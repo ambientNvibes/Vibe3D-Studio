@@ -1,5 +1,8 @@
 # Vibe3D Studio
 
+> ⚠️ **Copyright © 2026 ambientNvibes — All Rights Reserved.**  
+> Source code may not be copied, reused, or redistributed. [See LICENSE](LICENSE)
+
 Self-contained **HTML 3D modeling editor** built with Three.js — no install, no server, just open and create.
 
 ## ✨ Features
@@ -14,13 +17,9 @@ Self-contained **HTML 3D modeling editor** built with Three.js — no install, n
 - **Autosave** — LocalStorage persistence
 - **No install** — Single `.html` file
 
-## 🚀 Quick Start
+## 🚀 Live Demo
 
-1. Download `index.html`
-2. Open in any modern browser
-3. Start modeling!
-
-**Live Demo**: https://ambientNvibes.github.io/Vibe3D-Studio
+**https://ambientnvibes.github.io/Vibe3D-Studio**
 
 ## 🎮 Controls
 
@@ -60,4 +59,6 @@ Self-contained **HTML 3D modeling editor** built with Three.js — no install, n
 
 ## 📄 License
 
-MIT — fork, modify, build on it freely.
+Copyright © 2026 ambientNvibes — All Rights Reserved.  
+Source code may not be copied, reused, or redistributed without permission.  
+See [LICENSE](LICENSE) for full terms.
