@@ -1,23 +1,34 @@
 Copyright © 2026 ambientNvibes. All Rights Reserved.
 
-This software and its source code are the exclusive property of ambientNvibes.
+This software, including its source code, design, structure, and associated assets, is the exclusive property of ambientNvibes.
 
-Permission is NOT granted to any person to copy, modify, merge, publish,
-distribute, sublicense, sell, or use this software or any portion of it
-without the express written permission of the copyright owner.
+No permission is granted to any individual or entity to use, copy, reproduce, modify, distribute, sublicense, sell, reverse engineer, or create derivative works from this software or any portion of it without explicit prior written consent from the copyright holder.
+
+Permitted Use
 
 You MAY:
-- Use the live hosted version of Vibe3D Studio for personal, non-commercial purposes
-- Share the link to the live app
+
+* Access and use the live hosted version of Vibe3D Studio for personal, non-commercial purposes only
+* Share official links to the hosted application
+
+Prohibited Use
 
 You MAY NOT:
-- Copy, download, or reuse the source code
-- Build derivative works or competing products based on this code
-- Redistribute or repackage this software in any form
-- Use this code for commercial purposes
 
-Unauthorized use, reproduction, or distribution of this software,
-in whole or in part, may result in civil and criminal penalties.
+* Copy, download, or reuse the source code for any purpose
+* Modify, adapt, or create derivative works based on this software
+* Reverse engineer, decompile, or attempt to extract source logic
+* Redistribute, repackage, or host this software independently
+* Use this software or its concepts to develop competing products
+* Use any part of this software for commercial purposes
+
+Unauthorized use may result in legal action, including civil and criminal penalties.
+
+Disclaimer
+
+This software is provided “as is,” without warranty of any kind, express or implied, including but not limited to fitness for a particular purpose. The author shall not be held liable for any damages arising from its use.
+
+Contact
 
 For licensing inquiries, contact: ambientNvibes on GitHub
 https://github.com/ambientNvibes
