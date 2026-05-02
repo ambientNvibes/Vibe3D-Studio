@@ -1698,9 +1698,10 @@
                     outlineColor: { value: new THREE.Color(renderStyleState.outlineColor) }
                 },
                 vertexShader: [
+                    "attribute vec3 outlineNormal;",
                     "uniform float outlineThickness;",
                     "void main() {",
-                    "    vec3 displaced = position + normal * outlineThickness;",
+                    "    vec3 displaced = position + outlineNormal * outlineThickness;",
                     "    gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);",
                     "}"
                 ].join("\n"),
@@ -1713,6 +1714,70 @@
                 side: THREE.BackSide
             });
             return outlineMaterial;
+        }
+
+
+        function ensureOutlineNormalAttribute(geometry) {
+            if (!geometry || !geometry.attributes || !geometry.attributes.position) return;
+            const posAttr = geometry.attributes.position;
+            const normAttr = geometry.attributes.normal;
+            const versionKey = `${posAttr.version}|${posAttr.count}|${normAttr ? normAttr.version : "x"}`;
+            geometry.userData = geometry.userData || {};
+            if (geometry.attributes.outlineNormal && geometry.userData.outlineNormalVersion === versionKey) return;
+
+            const count = posAttr.count;
+            const positions = posAttr.array;
+            const normals = normAttr ? normAttr.array : null;
+            const buckets = new Map();
+
+            for (let i = 0; i < count; i++) {
+                const px = positions[i * 3];
+                const py = positions[i * 3 + 1];
+                const pz = positions[i * 3 + 2];
+                const key = `${Math.round(px * 100000)}|${Math.round(py * 100000)}|${Math.round(pz * 100000)}`;
+                let bucket = buckets.get(key);
+                if (!bucket) {
+                    bucket = { x: 0, y: 0, z: 0, indices: [] };
+                    buckets.set(key, bucket);
+                }
+                if (normals) {
+                    bucket.x += normals[i * 3];
+                    bucket.y += normals[i * 3 + 1];
+                    bucket.z += normals[i * 3 + 2];
+                } else {
+                    const fallbackLen = Math.hypot(px, py, pz) || 1;
+                    bucket.x += px / fallbackLen;
+                    bucket.y += py / fallbackLen;
+                    bucket.z += pz / fallbackLen;
+                }
+                bucket.indices.push(i);
+            }
+
+            const out = new Float32Array(count * 3);
+            buckets.forEach((bucket) => {
+                let nx = bucket.x;
+                let ny = bucket.y;
+                let nz = bucket.z;
+                const len = Math.hypot(nx, ny, nz);
+                if (len > 1e-6) {
+                    nx /= len; ny /= len; nz /= len;
+                } else if (normals) {
+                    nx = normals[bucket.indices[0] * 3];
+                    ny = normals[bucket.indices[0] * 3 + 1];
+                    nz = normals[bucket.indices[0] * 3 + 2];
+                } else {
+                    nx = 0; ny = 1; nz = 0;
+                }
+                for (let k = 0; k < bucket.indices.length; k++) {
+                    const idx = bucket.indices[k];
+                    out[idx * 3] = nx;
+                    out[idx * 3 + 1] = ny;
+                    out[idx * 3 + 2] = nz;
+                }
+            });
+
+            geometry.setAttribute("outlineNormal", new THREE.BufferAttribute(out, 3));
+            geometry.userData.outlineNormalVersion = versionKey;
         }
 
 
@@ -1768,6 +1833,7 @@
                 return;
             }
             if (!existing) {
+                ensureOutlineNormalAttribute(mesh.geometry);
                 const outline = new THREE.Mesh(mesh.geometry, getOutlineMaterial());
                 outline.userData.kind = "outline";
                 outline.castShadow = false;
@@ -1776,7 +1842,10 @@
                 outline.raycast = () => null;
                 mesh.add(outline);
             } else if (existing.geometry !== mesh.geometry) {
+                ensureOutlineNormalAttribute(mesh.geometry);
                 existing.geometry = mesh.geometry;
+            } else {
+                ensureOutlineNormalAttribute(mesh.geometry);
             }
         }
 
@@ -1794,12 +1863,15 @@
             if (renderStyleState.style !== "toon" || !renderStyleState.outlineEnabled) return;
             contentRoot.traverse((obj) => {
                 if (obj && obj.isMesh && obj.userData && obj.userData.kind === "render") {
+                    let hasOutline = false;
                     for (let i = 0; i < obj.children.length; i++) {
                         const child = obj.children[i];
-                        if (isOutlineHelper(child) && child.geometry !== obj.geometry) {
-                            child.geometry = obj.geometry;
+                        if (isOutlineHelper(child)) {
+                            hasOutline = true;
+                            if (child.geometry !== obj.geometry) child.geometry = obj.geometry;
                         }
                     }
+                    if (hasOutline) ensureOutlineNormalAttribute(obj.geometry);
                 }
             });
         }
