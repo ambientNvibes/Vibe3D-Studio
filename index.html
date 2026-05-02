@@ -1173,7 +1173,33 @@
         </div>
 
 
-        <div id="renderWorkspacePanel" class="glass" style="position:fixed; top:76px; right:372px; z-index:310; display:none; gap:10px; width:260px; padding:12px; border-radius:18px; background:rgba(9,11,16,0.92); border:1px solid rgba(255,255,255,0.08); box-shadow:0 12px 30px rgba(0,0,0,0.24); backdrop-filter:blur(10px); pointer-events:auto;">
+        <div id="renderWorkspacePanel" class="glass" style="position:fixed; top:76px; right:372px; z-index:310; display:none; gap:10px; width:260px; padding:12px; border-radius:18px; background:rgba(9,11,16,0.92); border:1px solid rgba(255,255,255,0.08); box-shadow:0 12px 30px rgba(0,0,0,0.24); backdrop-filter:blur(10px); pointer-events:auto; max-height:calc(100vh - 120px); overflow-y:auto;">
+            <div style="font-size:13px; color:#f0d376; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;">Style</div>
+            <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:6px;">
+                <button id="renderStylePbrBtn" class="tool-btn active" type="button">PBR</button>
+                <button id="renderStyleToonBtn" class="tool-btn" type="button">Toon</button>
+            </div>
+            <div id="renderToonControls" style="display:none; gap:8px;">
+                <button id="renderOutlineToggleBtn" class="tool-btn active" type="button">Outline On</button>
+                <label style="display:grid; gap:4px; font-size:11px; color:#cfd6e6;">
+                    <span id="renderOutlineThicknessLabel">Outline Thickness • 0.012</span>
+                    <input id="renderOutlineThickness" type="range" min="0" max="0.06" step="0.001" value="0.012" style="width:100%;" />
+                </label>
+                <label style="display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:11px; color:#cfd6e6;">
+                    <span>Outline Color</span>
+                    <input id="renderOutlineColor" type="color" value="#0a0d14" style="width:64px; height:28px; background:transparent; border:1px solid rgba(255,255,255,0.12); border-radius:6px; padding:0; cursor:pointer;" />
+                </label>
+                <div style="display:grid; gap:4px; font-size:11px; color:#cfd6e6;">
+                    <span>Light Bands</span>
+                    <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:4px;">
+                        <button id="renderBands2Btn" class="tool-btn" type="button">2</button>
+                        <button id="renderBands3Btn" class="tool-btn active" type="button">3</button>
+                        <button id="renderBands4Btn" class="tool-btn" type="button">4</button>
+                        <button id="renderBands5Btn" class="tool-btn" type="button">5</button>
+                    </div>
+                </div>
+            </div>
+            <div style="height:1px; background:rgba(255,255,255,0.08); margin:2px 0;"></div>
             <div style="font-size:13px; color:#f0d376; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;">Render Tools</div>
             <div style="display:grid; gap:8px;">
                 <button id="renderSafeFrameBtn" class="tool-btn" type="button">Safe Frame Off</button>
@@ -1632,7 +1658,80 @@
         }
 
 
-        function createMaterial(color, extra = {}) {
+        const renderStyleState = {
+            style: "pbr",
+            outlineEnabled: true,
+            outlineThickness: 0.012,
+            outlineColor: "#0a0d14",
+            toonBands: 3
+        };
+
+
+        let toonGradientMap = null;
+        function rebuildToonGradientMap() {
+            const bands = Math.max(2, Math.min(5, renderStyleState.toonBands | 0));
+            const data = new Uint8Array(bands);
+            for (let i = 0; i < bands; i++) {
+                data[i] = Math.round(255 * (i + 1) / bands);
+            }
+            if (toonGradientMap && toonGradientMap.dispose) toonGradientMap.dispose();
+            toonGradientMap = new THREE.DataTexture(data, bands, 1, THREE.LuminanceFormat);
+            toonGradientMap.minFilter = THREE.NearestFilter;
+            toonGradientMap.magFilter = THREE.NearestFilter;
+            toonGradientMap.generateMipmaps = false;
+            toonGradientMap.needsUpdate = true;
+            return toonGradientMap;
+        }
+
+
+        function getToonGradientMap() {
+            return toonGradientMap || rebuildToonGradientMap();
+        }
+
+
+        let outlineMaterial = null;
+        function getOutlineMaterial() {
+            if (outlineMaterial) return outlineMaterial;
+            outlineMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    outlineThickness: { value: renderStyleState.outlineThickness },
+                    outlineColor: { value: new THREE.Color(renderStyleState.outlineColor) }
+                },
+                vertexShader: [
+                    "uniform float outlineThickness;",
+                    "void main() {",
+                    "    vec3 displaced = position + normal * outlineThickness;",
+                    "    gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);",
+                    "}"
+                ].join("\n"),
+                fragmentShader: [
+                    "uniform vec3 outlineColor;",
+                    "void main() {",
+                    "    gl_FragColor = vec4(outlineColor, 1.0);",
+                    "}"
+                ].join("\n"),
+                side: THREE.BackSide
+            });
+            return outlineMaterial;
+        }
+
+
+        function buildToonMaterial(color, extra = {}) {
+            const safeExtra = { ...extra };
+            delete safeExtra.clearcoat;
+            delete safeExtra.clearcoatRoughness;
+            delete safeExtra.metalness;
+            delete safeExtra.roughness;
+            const mat = new THREE.MeshToonMaterial({
+                color,
+                gradientMap: getToonGradientMap(),
+                ...safeExtra
+            });
+            return mat;
+        }
+
+
+        function buildPbrMaterial(color, extra = {}) {
             return new THREE.MeshPhysicalMaterial({
                 color,
                 roughness: 0.22,
@@ -1641,6 +1740,167 @@
                 clearcoatRoughness: 0.18,
                 ...extra
             });
+        }
+
+
+        function createMaterial(color, extra = {}) {
+            if (renderStyleState.style === "toon") return buildToonMaterial(color, extra);
+            return buildPbrMaterial(color, extra);
+        }
+
+
+        function isOutlineHelper(node) {
+            return !!node && node.userData && node.userData.kind === "outline";
+        }
+
+
+        function ensureOutlineForMesh(mesh) {
+            if (!mesh || !mesh.isMesh) return;
+            if (!mesh.userData || mesh.userData.kind !== "render") return;
+            if (mesh.userData.type === "reference") return;
+            const want = renderStyleState.style === "toon" && renderStyleState.outlineEnabled;
+            let existing = null;
+            for (let i = 0; i < mesh.children.length; i++) {
+                if (isOutlineHelper(mesh.children[i])) { existing = mesh.children[i]; break; }
+            }
+            if (!want) {
+                if (existing) mesh.remove(existing);
+                return;
+            }
+            if (!existing) {
+                const outline = new THREE.Mesh(mesh.geometry, getOutlineMaterial());
+                outline.userData.kind = "outline";
+                outline.castShadow = false;
+                outline.receiveShadow = false;
+                outline.frustumCulled = false;
+                outline.raycast = () => null;
+                mesh.add(outline);
+            } else if (existing.geometry !== mesh.geometry) {
+                existing.geometry = mesh.geometry;
+            }
+        }
+
+
+        function refreshAllOutlines() {
+            if (typeof contentRoot === "undefined") return;
+            contentRoot.traverse((obj) => {
+                if (obj && obj.userData && obj.userData.kind === "render") ensureOutlineForMesh(obj);
+            });
+        }
+
+
+        function syncOutlineGeometryReferences() {
+            if (typeof contentRoot === "undefined") return;
+            if (renderStyleState.style !== "toon" || !renderStyleState.outlineEnabled) return;
+            contentRoot.traverse((obj) => {
+                if (obj && obj.isMesh && obj.userData && obj.userData.kind === "render") {
+                    for (let i = 0; i < obj.children.length; i++) {
+                        const child = obj.children[i];
+                        if (isOutlineHelper(child) && child.geometry !== obj.geometry) {
+                            child.geometry = obj.geometry;
+                        }
+                    }
+                }
+            });
+        }
+
+
+        function applyMaterialStyleToMesh(mesh) {
+            if (!mesh || !mesh.isMesh) return;
+            if (!mesh.userData || mesh.userData.kind !== "render") return;
+            if (mesh.userData.type === "reference") return;
+            const current = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+            if (!current) return;
+            const wantToon = renderStyleState.style === "toon";
+            const isToon = !!current.isMeshToonMaterial;
+            if (wantToon && isToon) return;
+            if (!wantToon && !isToon) return;
+
+            const color = current.color ? current.color.clone() : new THREE.Color(0xffffff);
+            const map = current.map || null;
+            const side = current.side != null ? current.side : THREE.FrontSide;
+            const transparent = !!current.transparent;
+            const opacity = current.opacity != null ? current.opacity : 1;
+
+            let next;
+            if (wantToon) {
+                if (!mesh.userData.materialBackup) mesh.userData.materialBackup = current;
+                next = buildToonMaterial(color, { side, transparent, opacity });
+                if (map) next.map = map;
+            } else {
+                const backup = mesh.userData.materialBackup;
+                if (backup && (backup.isMeshPhysicalMaterial || backup.isMeshStandardMaterial)) {
+                    backup.color.copy(color);
+                    backup.map = map;
+                    backup.transparent = transparent;
+                    backup.opacity = opacity;
+                    backup.side = side;
+                    backup.needsUpdate = true;
+                    next = backup;
+                } else {
+                    next = buildPbrMaterial(color, { side, transparent, opacity });
+                    if (map) next.map = map;
+                }
+                mesh.userData.materialBackup = null;
+                if (current && current !== next && current.dispose) current.dispose();
+            }
+            next.needsUpdate = true;
+            mesh.material = next;
+        }
+
+
+        function applyRenderStyle() {
+            if (typeof contentRoot === "undefined") return;
+            contentRoot.traverse((obj) => applyMaterialStyleToMesh(obj));
+            refreshAllOutlines();
+        }
+
+
+        function setRenderStyle(style) {
+            const next = style === "toon" ? "toon" : "pbr";
+            if (renderStyleState.style === next) return;
+            renderStyleState.style = next;
+            applyRenderStyle();
+            if (typeof updateRenderStylePanel === "function") updateRenderStylePanel();
+            if (typeof setStatus === "function") setStatus(next === "toon" ? "Toon shading on" : "PBR shading on");
+        }
+
+
+        function setOutlineEnabled(enabled) {
+            renderStyleState.outlineEnabled = !!enabled;
+            refreshAllOutlines();
+            if (typeof updateRenderStylePanel === "function") updateRenderStylePanel();
+        }
+
+
+        function setOutlineThickness(value) {
+            const v = Math.max(0, Math.min(0.06, Number(value) || 0));
+            renderStyleState.outlineThickness = v;
+            if (outlineMaterial) outlineMaterial.uniforms.outlineThickness.value = v;
+            if (typeof updateRenderStylePanel === "function") updateRenderStylePanel();
+        }
+
+
+        function setOutlineColor(hex) {
+            renderStyleState.outlineColor = hex;
+            if (outlineMaterial) outlineMaterial.uniforms.outlineColor.value.set(hex);
+            if (typeof updateRenderStylePanel === "function") updateRenderStylePanel();
+        }
+
+
+        function setToonBands(bands) {
+            const v = Math.max(2, Math.min(5, bands | 0));
+            renderStyleState.toonBands = v;
+            const map = rebuildToonGradientMap();
+            if (typeof contentRoot !== "undefined") {
+                contentRoot.traverse((obj) => {
+                    if (obj.isMesh && obj.material && obj.material.isMeshToonMaterial) {
+                        obj.material.gradientMap = map;
+                        obj.material.needsUpdate = true;
+                    }
+                });
+            }
+            if (typeof updateRenderStylePanel === "function") updateRenderStylePanel();
         }
 
 
@@ -1922,6 +2182,7 @@
             }
 
 
+            ensureOutlineForMesh(mesh);
             return mesh;
         }
 
@@ -4488,6 +4749,36 @@
             const savedCount = renderState.cameraBookmarks.filter(Boolean).length;
             info.textContent = `Aspect ${renderState.aspect} • ${savedCount}/3 camera bookmarks saved`;
             updateSafeFrameOverlay();
+            updateRenderStylePanel();
+        }
+
+
+        function updateRenderStylePanel() {
+            const pbrBtn = document.getElementById("renderStylePbrBtn");
+            const toonBtn = document.getElementById("renderStyleToonBtn");
+            const toonControls = document.getElementById("renderToonControls");
+            if (!pbrBtn || !toonBtn || !toonControls) return;
+            const isToon = renderStyleState.style === "toon";
+            pbrBtn.classList.toggle("active", !isToon);
+            toonBtn.classList.toggle("active", isToon);
+            toonControls.style.display = isToon ? "grid" : "none";
+
+            const outlineBtn = document.getElementById("renderOutlineToggleBtn");
+            const thickInput = document.getElementById("renderOutlineThickness");
+            const thickLabel = document.getElementById("renderOutlineThicknessLabel");
+            const colorInput = document.getElementById("renderOutlineColor");
+            if (outlineBtn) {
+                outlineBtn.textContent = renderStyleState.outlineEnabled ? "Outline On" : "Outline Off";
+                outlineBtn.classList.toggle("active", renderStyleState.outlineEnabled);
+            }
+            if (thickInput) thickInput.value = String(renderStyleState.outlineThickness);
+            if (thickLabel) thickLabel.textContent = `Outline Thickness • ${renderStyleState.outlineThickness.toFixed(3)}`;
+            if (colorInput) colorInput.value = renderStyleState.outlineColor;
+
+            for (let b = 2; b <= 5; b++) {
+                const btn = document.getElementById(`renderBands${b}Btn`);
+                if (btn) btn.classList.toggle("active", renderStyleState.toonBands === b);
+            }
         }
 
 
@@ -5827,6 +6118,7 @@
 
 
                 source.children.forEach((child) => {
+                    if (child.userData && child.userData.kind === "outline") return;
                     const subgroup = new THREE.Group();
                     subgroup.position.copy(child.position);
                     subgroup.rotation.copy(child.rotation);
@@ -7670,7 +7962,7 @@
             const root = contentRoot.clone(true);
             const removal = [];
             root.traverse((node) => {
-                if (node.userData?.kind === "socket") removal.push(node);
+                if (node.userData?.kind === "socket" || node.userData?.kind === "outline") removal.push(node);
             });
             removal.forEach((node) => {
                 if (node.parent) node.parent.remove(node);
@@ -8362,6 +8654,15 @@
         document.getElementById("btnClearTexture").onpointerdown = (e) => { e.preventDefault(); clearTexture(); };
 
 
+        document.getElementById("renderStylePbrBtn").addEventListener("click", () => setRenderStyle("pbr"));
+        document.getElementById("renderStyleToonBtn").addEventListener("click", () => setRenderStyle("toon"));
+        document.getElementById("renderOutlineToggleBtn").addEventListener("click", () => setOutlineEnabled(!renderStyleState.outlineEnabled));
+        document.getElementById("renderOutlineThickness").addEventListener("input", (e) => setOutlineThickness(e.target.value));
+        document.getElementById("renderOutlineColor").addEventListener("input", (e) => setOutlineColor(e.target.value));
+        document.getElementById("renderBands2Btn").addEventListener("click", () => setToonBands(2));
+        document.getElementById("renderBands3Btn").addEventListener("click", () => setToonBands(3));
+        document.getElementById("renderBands4Btn").addEventListener("click", () => setToonBands(4));
+        document.getElementById("renderBands5Btn").addEventListener("click", () => setToonBands(5));
         document.getElementById("renderSafeFrameBtn").addEventListener("click", () => toggleSafeFrame());
         document.getElementById("renderAspect16x9Btn").addEventListener("click", () => setRenderAspect("16:9"));
         document.getElementById("renderAspect1x1Btn").addEventListener("click", () => setRenderAspect("1:1"));
@@ -8765,6 +9066,7 @@
             selectionOverlayGroup.children.forEach((helper) => {
                 if (helper.update) helper.update();
             });
+            syncOutlineGeometryReferences();
             renderer.render(scene, camera);
         }
 
