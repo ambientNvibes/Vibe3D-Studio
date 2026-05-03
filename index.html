@@ -1240,6 +1240,7 @@
                 <button class="mode-btn" data-dock-mode="transform"><span class="mode-icon">✥</span><span class="mode-text">Transform</span></button>
                 <button class="mode-btn" data-dock-mode="edit"><span class="mode-icon">✎</span><span class="mode-text">Edit</span></button>
                 <button class="mode-btn" data-dock-mode="sculpt"><span class="mode-icon">◍</span><span class="mode-text">Sculpt</span></button>
+                <button class="mode-btn" data-dock-mode="hair"><span class="mode-icon">⁂</span><span class="mode-text">Hair</span></button>
                 <button class="mode-btn" data-dock-mode="surface"><span class="mode-icon">◌</span><span class="mode-text">Surface</span></button>
                 <button class="mode-btn" data-dock-mode="view"><span class="mode-icon">⌘</span><span class="mode-text">View</span></button>
             </div>
@@ -3635,6 +3636,224 @@
 
 
         /* =========================================================
+           5d) HAIR CARDS
+        ========================================================= */
+
+
+        const hairCardState = {
+            length: 1.0,
+            widthBase: 0.16,
+            widthTip: 0.4,
+            segments: 10,
+            bend: 0.35,
+            twist: 0,
+            color: "#2a1c14",
+            fanCount: 7,
+            fanSpread: Math.PI * 0.7
+        };
+
+
+        function buildHairStrandGeometry(params) {
+            const segments = Math.max(2, Math.min(48, params.segments | 0 || 10));
+            const length = Math.max(0.05, Number(params.length) || 1);
+            const wb = Math.max(0.005, Number(params.widthBase) || 0.16);
+            const wtFrac = Math.max(0, Math.min(1, Number(params.widthTip) || 0.4));
+            const bend = Math.max(0, Math.min(2, Number(params.bend) || 0));
+            const twist = Number(params.twist) || 0;
+
+            const vertCount = (segments + 1) * 2;
+            const positions = new Float32Array(vertCount * 3);
+            const uvs = new Float32Array(vertCount * 2);
+            const indices = [];
+
+            for (let i = 0; i <= segments; i++) {
+                const t = i / segments;
+                const y = t * length;
+                const w = wb * (1 - t * (1 - wtFrac));
+                const bz = -bend * length * t * t;
+                const ang = twist * t;
+                const cos = Math.cos(ang);
+                const sin = Math.sin(ang);
+                for (let j = 0; j < 2; j++) {
+                    const lr = j === 0 ? -1 : 1;
+                    const cx = lr * (w * 0.5) * cos;
+                    const cz = bz + lr * (w * 0.5) * sin;
+                    const idx = (i * 2 + j) * 3;
+                    positions[idx] = cx;
+                    positions[idx + 1] = y;
+                    positions[idx + 2] = cz;
+                    const uvIdx = (i * 2 + j) * 2;
+                    uvs[uvIdx] = j;
+                    uvs[uvIdx + 1] = t;
+                }
+            }
+
+            for (let i = 0; i < segments; i++) {
+                const a = i * 2;
+                const b = a + 1;
+                const c = a + 2;
+                const d = a + 3;
+                indices.push(a, c, b, b, c, d);
+            }
+
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+            geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+            geom.setIndex(indices);
+            geom.computeVertexNormals();
+            return geom;
+        }
+
+
+        function makeHairStrand(params) {
+            const geom = buildHairStrandGeometry(params);
+            const colorHex = new THREE.Color(params.color || hairCardState.color);
+            const mat = createMaterial(colorHex, { side: THREE.DoubleSide });
+            const mesh = new THREE.Mesh(geom, mat);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.userData = { id: null, kind: "render", type: "mesh", name: "HairStrand" };
+            ensureOutlineForMesh(mesh);
+            return mesh;
+        }
+
+
+        function spawnHairStrand() {
+            const strand = makeHairStrand(hairCardState);
+            assignNodeIdentity(strand, "mesh", `Hair_${nextId}`);
+            contentRoot.add(strand);
+            if (selectedObject && isHierarchyNode(selectedObject)) {
+                strand.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
+                strand.position.y += 0.05;
+            }
+            selectObject(strand);
+            recordHistory();
+            setStatus(`Hair strand added`);
+            updateUI();
+        }
+
+
+        function spawnHairFan() {
+            const group = makeGroupNode("HairFan");
+            assignNodeIdentity(group, "group", `HairFan_${nextId}`);
+            const count = Math.max(2, Math.min(24, hairCardState.fanCount | 0));
+            const spread = hairCardState.fanSpread;
+            const radius = hairCardState.length * 0.18;
+
+            for (let i = 0; i < count; i++) {
+                const t = count === 1 ? 0.5 : i / (count - 1);
+                const angle = (t - 0.5) * spread;
+                const variation = (i % 3) / 2;
+                const params = {
+                    ...hairCardState,
+                    length: hairCardState.length * (0.85 + 0.3 * variation),
+                    bend: hairCardState.bend * (0.7 + 0.6 * Math.abs(t - 0.5) * 2)
+                };
+                const strand = makeHairStrand(params);
+                assignNodeIdentity(strand, "mesh", `HairStrand_${nextId}`);
+                strand.position.set(Math.sin(angle) * radius, 0, -Math.cos(angle) * radius * 0.4);
+                strand.rotation.y = angle;
+                group.add(strand);
+            }
+
+            contentRoot.add(group);
+            if (selectedObject && isHierarchyNode(selectedObject)) {
+                group.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
+                group.position.y += 0.5;
+            }
+            selectObject(group);
+            recordHistory();
+            setStatus(`Hair fan added • ${count} strands`);
+            updateUI();
+        }
+
+
+        function spawnHairBangs() {
+            const group = makeGroupNode("HairBangs");
+            assignNodeIdentity(group, "group", `HairBangs_${nextId}`);
+            const count = Math.max(3, hairCardState.fanCount | 0);
+            const spread = Math.PI * 0.95;
+
+            for (let i = 0; i < count; i++) {
+                const t = count === 1 ? 0.5 : i / (count - 1);
+                const angle = (t - 0.5) * spread;
+                const dropoff = 1 - Math.abs(t - 0.5) * 1.5;
+                const params = {
+                    ...hairCardState,
+                    length: hairCardState.length * Math.max(0.4, dropoff),
+                    bend: hairCardState.bend * 1.4,
+                    widthBase: hairCardState.widthBase * 0.85
+                };
+                const strand = makeHairStrand(params);
+                assignNodeIdentity(strand, "mesh", `Bang_${nextId}`);
+                strand.position.set(Math.sin(angle) * 0.32, 0.05, -Math.cos(angle) * 0.08);
+                strand.rotation.x = Math.PI;
+                strand.rotation.z = -angle * 0.4;
+                group.add(strand);
+            }
+
+            contentRoot.add(group);
+            if (selectedObject && isHierarchyNode(selectedObject)) {
+                group.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
+                group.position.y += 0.5;
+            }
+            selectObject(group);
+            recordHistory();
+            setStatus(`Bangs added • ${count} strands`);
+            updateUI();
+        }
+
+
+        function adjustHairLength(d) {
+            hairCardState.length = Math.max(0.1, Math.min(3, Math.round((hairCardState.length + d) * 100) / 100));
+            updateUI();
+            setStatus(`Hair length ${hairCardState.length.toFixed(2)}`);
+        }
+
+
+        function adjustHairWidth(d) {
+            hairCardState.widthBase = Math.max(0.02, Math.min(0.5, Math.round((hairCardState.widthBase + d) * 1000) / 1000));
+            updateUI();
+            setStatus(`Hair width ${hairCardState.widthBase.toFixed(3)}`);
+        }
+
+
+        function adjustHairBend(d) {
+            hairCardState.bend = Math.max(0, Math.min(1.5, Math.round((hairCardState.bend + d) * 100) / 100));
+            updateUI();
+            setStatus(`Hair bend ${hairCardState.bend.toFixed(2)}`);
+        }
+
+
+        function adjustHairTaper(d) {
+            hairCardState.widthTip = Math.max(0, Math.min(1, Math.round((hairCardState.widthTip + d) * 100) / 100));
+            updateUI();
+            setStatus(`Hair taper ${hairCardState.widthTip.toFixed(2)}`);
+        }
+
+
+        function adjustHairFanCount(d) {
+            hairCardState.fanCount = Math.max(2, Math.min(24, hairCardState.fanCount + d));
+            updateUI();
+            setStatus(`Fan strands ${hairCardState.fanCount}`);
+        }
+
+
+        function adjustHairSegments(d) {
+            hairCardState.segments = Math.max(2, Math.min(40, hairCardState.segments + d));
+            updateUI();
+            setStatus(`Hair segments ${hairCardState.segments}`);
+        }
+
+
+        function setHairColor(hex) {
+            hairCardState.color = hex;
+            updateUI();
+            setStatus(`Hair color ${hex}`);
+        }
+
+
+        /* =========================================================
            6) DRAG LOCKS
         ========================================================= */
 
@@ -4852,6 +5071,40 @@
                     ]
                 ]
             },
+            hair: {
+                label: "Hair",
+                groups: [
+                    [
+                        { action: "spawnHairStrand", icon: "ǁ", label: "Strand" },
+                        { action: "spawnHairFan", icon: "≣", label: "Fan" },
+                        { action: "spawnHairBangs", icon: "⁂", label: "Bangs" }
+                    ],
+                    [
+                        { action: "hairLengthDown", icon: "－", label: "L-" },
+                        { action: "hairLengthReadout", icon: "↕", label: () => `Length ${hairCardState.length.toFixed(2)}` },
+                        { action: "hairLengthUp", icon: "＋", label: "L+" },
+                        { action: "hairWidthDown", icon: "－", label: "W-" },
+                        { action: "hairWidthReadout", icon: "↔", label: () => `Width ${hairCardState.widthBase.toFixed(3)}` },
+                        { action: "hairWidthUp", icon: "＋", label: "W+" }
+                    ],
+                    [
+                        { action: "hairBendDown", icon: "－", label: "B-" },
+                        { action: "hairBendReadout", icon: "⌒", label: () => `Bend ${hairCardState.bend.toFixed(2)}` },
+                        { action: "hairBendUp", icon: "＋", label: "B+" },
+                        { action: "hairTaperDown", icon: "－", label: "T-" },
+                        { action: "hairTaperReadout", icon: "▽", label: () => `Tip ${hairCardState.widthTip.toFixed(2)}` },
+                        { action: "hairTaperUp", icon: "＋", label: "T+" }
+                    ],
+                    [
+                        { action: "hairFanCountDown", icon: "－", label: "F-" },
+                        { action: "hairFanCountReadout", icon: "ɸ", label: () => `Strands ${hairCardState.fanCount}` },
+                        { action: "hairFanCountUp", icon: "＋", label: "F+" },
+                        { action: "hairSegmentsDown", icon: "－", label: "S-" },
+                        { action: "hairSegmentsReadout", icon: "≡", label: () => `Seg ${hairCardState.segments}` },
+                        { action: "hairSegmentsUp", icon: "＋", label: "S+" }
+                    ]
+                ]
+            },
             sculpt: {
                 label: "Sculpt",
                 groups: [
@@ -5041,6 +5294,10 @@
                 return;
             }
             if (mode === "select" && (editMode === "vertex" || editMode === "face" || editMode === "sculpt")) {
+                setEditMode("object");
+                return;
+            }
+            if (editMode === "sculpt" && mode !== "sculpt") {
                 setEditMode("object");
                 return;
             }
@@ -9305,6 +9562,28 @@
                 case "sculptToggleSymmetryX": toggleSculptSymmetryX(); break;
                 case "subdivideMesh": subdivideSelectedMesh(); break;
                 case "sculptObjectReturn": setDockMode("select"); setEditMode("object"); break;
+
+                case "spawnHairStrand": spawnHairStrand(); break;
+                case "spawnHairFan": spawnHairFan(); break;
+                case "spawnHairBangs": spawnHairBangs(); break;
+                case "hairLengthDown": adjustHairLength(-0.05); break;
+                case "hairLengthUp": adjustHairLength(0.05); break;
+                case "hairLengthReadout": break;
+                case "hairWidthDown": adjustHairWidth(-0.01); break;
+                case "hairWidthUp": adjustHairWidth(0.01); break;
+                case "hairWidthReadout": break;
+                case "hairBendDown": adjustHairBend(-0.05); break;
+                case "hairBendUp": adjustHairBend(0.05); break;
+                case "hairBendReadout": break;
+                case "hairTaperDown": adjustHairTaper(-0.05); break;
+                case "hairTaperUp": adjustHairTaper(0.05); break;
+                case "hairTaperReadout": break;
+                case "hairFanCountDown": adjustHairFanCount(-1); break;
+                case "hairFanCountUp": adjustHairFanCount(1); break;
+                case "hairFanCountReadout": break;
+                case "hairSegmentsDown": adjustHairSegments(-1); break;
+                case "hairSegmentsUp": adjustHairSegments(1); break;
+                case "hairSegmentsReadout": break;
                 case "toggleSnap": toggleSnap(); break;
                 case "moveMode": setTransformMode("translate"); break;
                 case "vertexInsert": vertexInsertSelected(); break;
