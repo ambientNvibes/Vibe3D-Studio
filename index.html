@@ -3364,6 +3364,194 @@
 
 
         /* =========================================================
+           5c) SUBDIVISION (Loop)
+        ========================================================= */
+
+
+        function buildWeldedTopology(geometry) {
+            const posAttr = geometry.attributes.position;
+            const positions = posAttr.array;
+            const count = posAttr.count;
+            const indices = geometry.index ? geometry.index.array : null;
+
+            const keyToId = new Map();
+            const weldedPos = [];
+            const vertexToId = new Int32Array(count);
+            for (let i = 0; i < count; i++) {
+                const px = positions[i * 3];
+                const py = positions[i * 3 + 1];
+                const pz = positions[i * 3 + 2];
+                const k = `${Math.round(px * 100000)}|${Math.round(py * 100000)}|${Math.round(pz * 100000)}`;
+                let id = keyToId.get(k);
+                if (id === undefined) {
+                    id = weldedPos.length / 3;
+                    keyToId.set(k, id);
+                    weldedPos.push(px, py, pz);
+                }
+                vertexToId[i] = id;
+            }
+
+            const triangles = [];
+            const triCount = indices ? Math.floor(indices.length / 3) : Math.floor(count / 3);
+            for (let t = 0; t < triCount; t++) {
+                const a = vertexToId[indices ? indices[t * 3]     : t * 3];
+                const b = vertexToId[indices ? indices[t * 3 + 1] : t * 3 + 1];
+                const c = vertexToId[indices ? indices[t * 3 + 2] : t * 3 + 2];
+                if (a === b || b === c || a === c) continue;
+                triangles.push(a, b, c);
+            }
+
+            return { weldedPos, triangles };
+        }
+
+
+        function loopSubdivideGeometry(geometry) {
+            if (!geometry || !geometry.attributes || !geometry.attributes.position) return null;
+            const { weldedPos, triangles } = buildWeldedTopology(geometry);
+            if (!triangles.length) return null;
+
+            const oldVCount = weldedPos.length / 3;
+            const triCount = triangles.length / 3;
+
+            // Edge map: key "min|max" -> { v0, v1, faces:[third0, third1] }
+            const edgeMap = new Map();
+            const edgeKey = (a, b) => a < b ? `${a}|${b}` : `${b}|${a}`;
+
+            // Vertex neighbors (for new-vertex point computation)
+            const neighbors = Array.from({ length: oldVCount }, () => new Set());
+
+            for (let t = 0; t < triCount; t++) {
+                const a = triangles[t * 3];
+                const b = triangles[t * 3 + 1];
+                const c = triangles[t * 3 + 2];
+                const pairs = [[a, b, c], [b, c, a], [a, c, b]];
+                for (const [u, v, third] of pairs) {
+                    neighbors[u].add(v);
+                    neighbors[v].add(u);
+                    const k = edgeKey(u, v);
+                    let entry = edgeMap.get(k);
+                    if (!entry) {
+                        entry = { v0: Math.min(u, v), v1: Math.max(u, v), thirds: [] };
+                        edgeMap.set(k, entry);
+                    }
+                    if (entry.thirds.length < 2) entry.thirds.push(third);
+                }
+            }
+
+            // Compute edge points (one new vertex per edge)
+            const edgeIndexMap = new Map(); // edge key -> new vertex index in output
+            const newPositions = weldedPos.slice(); // start with old verts (we'll overwrite them with new-vertex points)
+            const oldPositions = weldedPos;        // immutable reference
+
+            edgeMap.forEach((edge, key) => {
+                const v0 = edge.v0, v1 = edge.v1;
+                const ax = oldPositions[v0 * 3];
+                const ay = oldPositions[v0 * 3 + 1];
+                const az = oldPositions[v0 * 3 + 2];
+                const bx = oldPositions[v1 * 3];
+                const by = oldPositions[v1 * 3 + 1];
+                const bz = oldPositions[v1 * 3 + 2];
+                let nx, ny, nz;
+                if (edge.thirds.length === 2) {
+                    const t0 = edge.thirds[0], t1 = edge.thirds[1];
+                    const cx = oldPositions[t0 * 3];
+                    const cy = oldPositions[t0 * 3 + 1];
+                    const cz = oldPositions[t0 * 3 + 2];
+                    const dx = oldPositions[t1 * 3];
+                    const dy = oldPositions[t1 * 3 + 1];
+                    const dz = oldPositions[t1 * 3 + 2];
+                    nx = 0.375 * (ax + bx) + 0.125 * (cx + dx);
+                    ny = 0.375 * (ay + by) + 0.125 * (cy + dy);
+                    nz = 0.375 * (az + bz) + 0.125 * (cz + dz);
+                } else {
+                    // boundary edge
+                    nx = 0.5 * (ax + bx);
+                    ny = 0.5 * (ay + by);
+                    nz = 0.5 * (az + bz);
+                }
+                const newIdx = newPositions.length / 3;
+                newPositions.push(nx, ny, nz);
+                edgeIndexMap.set(key, newIdx);
+            });
+
+            // Compute repositioned old vertices (Loop weights)
+            for (let v = 0; v < oldVCount; v++) {
+                const nbs = Array.from(neighbors[v]);
+                const n = nbs.length;
+                if (n < 2) continue; // leave isolated points
+                const beta = n === 3 ? 3 / 16 : 3 / (8 * n);
+                let sx = 0, sy = 0, sz = 0;
+                for (const nb of nbs) {
+                    sx += oldPositions[nb * 3];
+                    sy += oldPositions[nb * 3 + 1];
+                    sz += oldPositions[nb * 3 + 2];
+                }
+                const ox = oldPositions[v * 3];
+                const oy = oldPositions[v * 3 + 1];
+                const oz = oldPositions[v * 3 + 2];
+                newPositions[v * 3]     = (1 - n * beta) * ox + beta * sx;
+                newPositions[v * 3 + 1] = (1 - n * beta) * oy + beta * sy;
+                newPositions[v * 3 + 2] = (1 - n * beta) * oz + beta * sz;
+            }
+
+            // Build new triangles (4 per old)
+            const newIndices = new Array(triCount * 4 * 3);
+            let ni = 0;
+            for (let t = 0; t < triCount; t++) {
+                const a = triangles[t * 3];
+                const b = triangles[t * 3 + 1];
+                const c = triangles[t * 3 + 2];
+                const eAB = edgeIndexMap.get(edgeKey(a, b));
+                const eBC = edgeIndexMap.get(edgeKey(b, c));
+                const eAC = edgeIndexMap.get(edgeKey(a, c));
+                newIndices[ni++] = a;   newIndices[ni++] = eAB; newIndices[ni++] = eAC;
+                newIndices[ni++] = b;   newIndices[ni++] = eBC; newIndices[ni++] = eAB;
+                newIndices[ni++] = c;   newIndices[ni++] = eAC; newIndices[ni++] = eBC;
+                newIndices[ni++] = eAB; newIndices[ni++] = eBC; newIndices[ni++] = eAC;
+            }
+
+            // Output as indexed BufferGeometry so computeVertexNormals smooths across triangles
+            const out = new THREE.BufferGeometry();
+            out.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(newPositions), 3));
+            const indexArray = newPositions.length / 3 > 65535
+                ? new Uint32Array(newIndices)
+                : new Uint16Array(newIndices);
+            out.setIndex(new THREE.BufferAttribute(indexArray, 1));
+            out.computeVertexNormals();
+            return out;
+        }
+
+
+        function subdivideSelectedMesh() {
+            const mesh = selectedObject;
+            if (!isSculptable(mesh)) {
+                setStatus("Select a mesh to subdivide");
+                return;
+            }
+            const next = loopSubdivideGeometry(mesh.geometry);
+            if (!next) {
+                setStatus("Subdivide failed");
+                return;
+            }
+            const oldGeom = mesh.geometry;
+            mesh.geometry = next;
+            // Loop subdivision invalidates shared-quad metadata
+            if (mesh.userData) {
+                mesh.userData.sharedTopologyPrimitive = null;
+            }
+            if (oldGeom && oldGeom !== next) {
+                if (oldGeom.userData) oldGeom.userData.sculptAdjacency = null;
+                if (oldGeom.dispose) oldGeom.dispose();
+            }
+            ensureOutlineForMesh(mesh);
+            const verts = next.attributes.position.count;
+            recordHistory();
+            setStatus(`Subdivided • ${verts.toLocaleString()} verts`);
+            updateUI();
+        }
+
+
+        /* =========================================================
            6) DRAG LOCKS
         ========================================================= */
 
@@ -4569,7 +4757,17 @@
             },
             mesh: {
                 label: "Mesh",
-                groups: []
+                groups: [
+                    [
+                        { action: "subdivideMesh", icon: "▦", label: () => {
+                            const mesh = selectedObject;
+                            const v = mesh && mesh.geometry && mesh.geometry.attributes && mesh.geometry.attributes.position
+                                ? mesh.geometry.attributes.position.count
+                                : 0;
+                            return v ? `Subdivide · ${v.toLocaleString()}v` : "Subdivide";
+                        } }
+                    ]
+                ]
             },
             sculpt: {
                 label: "Sculpt",
@@ -4590,6 +4788,13 @@
                     ],
                     [
                         { action: "sculptToggleSymmetryX", icon: "⇄", label: "Symmetry X", active: () => sculptState.symmetryX },
+                        { action: "subdivideMesh", icon: "▦", label: () => {
+                            const mesh = selectedObject;
+                            const v = mesh && mesh.geometry && mesh.geometry.attributes && mesh.geometry.attributes.position
+                                ? mesh.geometry.attributes.position.count
+                                : 0;
+                            return v ? `Subdivide · ${v.toLocaleString()}v` : "Subdivide";
+                        } },
                         { action: "sculptObjectReturn", icon: "□", label: "Object" }
                     ]
                 ]
@@ -9013,6 +9218,7 @@
                 case "sculptStrengthDown": adjustSculptStrength(-0.05); break;
                 case "sculptStrengthReadout": break;
                 case "sculptToggleSymmetryX": toggleSculptSymmetryX(); break;
+                case "subdivideMesh": subdivideSelectedMesh(); break;
                 case "sculptObjectReturn": setDockMode("select"); setEditMode("object"); break;
                 case "toggleSnap": toggleSnap(); break;
                 case "moveMode": setTransformMode("translate"); break;
