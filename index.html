@@ -2991,7 +2991,8 @@
             radius: 0.5,
             strength: 0.5,
             symmetryX: true,
-            stroke: null
+            stroke: null,
+            lastIndicatorWorld: null
         };
 
 
@@ -3001,7 +3002,7 @@
                 color: 0xfff1b2,
                 side: THREE.DoubleSide,
                 transparent: true,
-                opacity: 0.78,
+                opacity: 0.85,
                 depthTest: false,
                 toneMapped: false
             })
@@ -3012,13 +3013,29 @@
         scene.add(sculptBrushIndicator);
 
 
+        const sculptBrushCore = new THREE.Mesh(
+            new THREE.CircleGeometry(0.85, 48),
+            new THREE.MeshBasicMaterial({
+                color: 0xfff1b2,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.18,
+                depthTest: false,
+                toneMapped: false
+            })
+        );
+        sculptBrushCore.renderOrder = 998;
+        sculptBrushCore.raycast = () => null;
+        sculptBrushIndicator.add(sculptBrushCore);
+
+
         const sculptBrushIndicatorMirror = new THREE.Mesh(
             new THREE.RingGeometry(0.94, 1.0, 64),
             new THREE.MeshBasicMaterial({
                 color: 0x9bd5ff,
                 side: THREE.DoubleSide,
                 transparent: true,
-                opacity: 0.55,
+                opacity: 0.6,
                 depthTest: false,
                 toneMapped: false
             })
@@ -3027,6 +3044,22 @@
         sculptBrushIndicatorMirror.visible = false;
         sculptBrushIndicatorMirror.raycast = () => null;
         scene.add(sculptBrushIndicatorMirror);
+
+
+        const sculptBrushCoreMirror = new THREE.Mesh(
+            new THREE.CircleGeometry(0.85, 48),
+            new THREE.MeshBasicMaterial({
+                color: 0x9bd5ff,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.14,
+                depthTest: false,
+                toneMapped: false
+            })
+        );
+        sculptBrushCoreMirror.renderOrder = 998;
+        sculptBrushCoreMirror.raycast = () => null;
+        sculptBrushIndicatorMirror.add(sculptBrushCoreMirror);
 
 
         const sculptAdjacencyCache = new WeakMap();
@@ -3223,21 +3256,62 @@
             sculptBrushIndicator.scale.setScalar(sculptState.radius);
             sculptBrushIndicator.lookAt(worldPoint.clone().add(camDir));
             sculptBrushIndicator.visible = true;
+            sculptBrushCore.material.opacity = 0.06 + 0.34 * sculptState.strength;
             if (sculptState.symmetryX && mesh) {
                 const mirror = mirrorWorldPointAcrossLocalX(mesh, worldPoint);
                 sculptBrushIndicatorMirror.position.copy(mirror);
                 sculptBrushIndicatorMirror.scale.setScalar(sculptState.radius);
                 sculptBrushIndicatorMirror.lookAt(mirror.clone().add(camDir));
                 sculptBrushIndicatorMirror.visible = true;
+                sculptBrushCoreMirror.material.opacity = 0.04 + 0.26 * sculptState.strength;
             } else {
                 sculptBrushIndicatorMirror.visible = false;
             }
+            sculptState.lastIndicatorWorld = worldPoint.clone();
         }
 
 
         function hideSculptBrushIndicator() {
             sculptBrushIndicator.visible = false;
             sculptBrushIndicatorMirror.visible = false;
+        }
+
+
+        function pickInitialSculptIndicatorPoint(mesh) {
+            if (!mesh || !isSculptable(mesh)) return null;
+            // Try a screen-center raycast against the mesh
+            pointer.x = 0;
+            pointer.y = 0;
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObject(mesh, false);
+            if (hits.length) return hits[0].point.clone();
+            // Fallback: front-of-camera point on the mesh's bounding sphere
+            mesh.geometry.computeBoundingSphere();
+            const s = mesh.geometry.boundingSphere;
+            if (!s) return mesh.getWorldPosition(new THREE.Vector3());
+            const center = s.center.clone();
+            mesh.localToWorld(center);
+            return center;
+        }
+
+
+        function refreshSculptBrushIndicator() {
+            if (editMode !== "sculpt") {
+                hideSculptBrushIndicator();
+                return;
+            }
+            const mesh = (sculptState.stroke && sculptState.stroke.mesh) || selectedObject;
+            if (!isSculptable(mesh)) {
+                hideSculptBrushIndicator();
+                return;
+            }
+            let world = sculptState.lastIndicatorWorld;
+            if (!world) world = pickInitialSculptIndicatorPoint(mesh);
+            if (!world) {
+                hideSculptBrushIndicator();
+                return;
+            }
+            updateSculptBrushIndicator(mesh, world);
         }
 
 
@@ -3336,6 +3410,7 @@
             if (!["grab", "smooth", "inflate", "crease"].includes(name)) return;
             sculptState.brush = name;
             updateUI();
+            refreshSculptBrushIndicator();
             setStatus(`Brush • ${name}`);
         }
 
@@ -3344,6 +3419,7 @@
             const next = Math.max(0.05, Math.min(3, Math.round((sculptState.radius + delta) * 100) / 100));
             sculptState.radius = next;
             updateUI();
+            refreshSculptBrushIndicator();
             setStatus(`Radius ${next.toFixed(2)}`);
         }
 
@@ -3352,6 +3428,7 @@
             const next = Math.max(0.05, Math.min(1, Math.round((sculptState.strength + delta) * 100) / 100));
             sculptState.strength = next;
             updateUI();
+            refreshSculptBrushIndicator();
             setStatus(`Strength ${next.toFixed(2)}`);
         }
 
@@ -3359,6 +3436,7 @@
         function toggleSculptSymmetryX() {
             sculptState.symmetryX = !sculptState.symmetryX;
             updateUI();
+            refreshSculptBrushIndicator();
             setStatus(`Symmetry X • ${sculptState.symmetryX ? "on" : "off"}`);
         }
 
@@ -5962,7 +6040,7 @@
                 : editMode === "face"
                     ? (selectedFaceData ? "Face Sel" : "Pick Face")
                     : editMode === "sculpt"
-                        ? `${sculptState.brush[0].toUpperCase() + sculptState.brush.slice(1)}${sculptState.symmetryX ? " · sym" : ""}`
+                        ? `${sculptState.brush[0].toUpperCase() + sculptState.brush.slice(1)} · r${sculptState.radius.toFixed(2)} · s${sculptState.strength.toFixed(2)}${sculptState.symmetryX ? " · sym" : ""}`
                         : transformMode === "translate"
                             ? "Move"
                             : transformMode === "rotate"
@@ -7126,6 +7204,8 @@
                 clearVertexHandles();
                 clearSelectedFace();
                 transform.detach();
+                sculptState.lastIndicatorWorld = null;
+                refreshSculptBrushIndicator();
                 setStatus("Sculpt mode • drag on mesh to brush");
             }
 
