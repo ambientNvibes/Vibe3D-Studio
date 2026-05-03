@@ -1239,6 +1239,7 @@
                 <button class="mode-btn" data-dock-mode="add"><span class="mode-icon">✚</span><span class="mode-text">Add</span></button>
                 <button class="mode-btn" data-dock-mode="transform"><span class="mode-icon">✥</span><span class="mode-text">Transform</span></button>
                 <button class="mode-btn" data-dock-mode="edit"><span class="mode-icon">✎</span><span class="mode-text">Edit</span></button>
+                <button class="mode-btn" data-dock-mode="sculpt"><span class="mode-icon">◍</span><span class="mode-text">Sculpt</span></button>
                 <button class="mode-btn" data-dock-mode="surface"><span class="mode-icon">◌</span><span class="mode-text">Surface</span></button>
                 <button class="mode-btn" data-dock-mode="view"><span class="mode-icon">⌘</span><span class="mode-text">View</span></button>
             </div>
@@ -2981,6 +2982,388 @@
 
 
         /* =========================================================
+           5b) SCULPT
+        ========================================================= */
+
+
+        const sculptState = {
+            brush: "grab",
+            radius: 0.5,
+            strength: 0.5,
+            symmetryX: true,
+            stroke: null
+        };
+
+
+        const sculptBrushIndicator = new THREE.Mesh(
+            new THREE.RingGeometry(0.94, 1.0, 64),
+            new THREE.MeshBasicMaterial({
+                color: 0xfff1b2,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.78,
+                depthTest: false,
+                toneMapped: false
+            })
+        );
+        sculptBrushIndicator.renderOrder = 999;
+        sculptBrushIndicator.visible = false;
+        sculptBrushIndicator.raycast = () => null;
+        scene.add(sculptBrushIndicator);
+
+
+        const sculptBrushIndicatorMirror = new THREE.Mesh(
+            new THREE.RingGeometry(0.94, 1.0, 64),
+            new THREE.MeshBasicMaterial({
+                color: 0x9bd5ff,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.55,
+                depthTest: false,
+                toneMapped: false
+            })
+        );
+        sculptBrushIndicatorMirror.renderOrder = 999;
+        sculptBrushIndicatorMirror.visible = false;
+        sculptBrushIndicatorMirror.raycast = () => null;
+        scene.add(sculptBrushIndicatorMirror);
+
+
+        const sculptAdjacencyCache = new WeakMap();
+
+
+        function isSculptable(node) {
+            return !!node && node.isMesh && node.userData && node.userData.kind === "render"
+                && node.userData.type !== "reference"
+                && node.geometry && node.geometry.attributes && node.geometry.attributes.position;
+        }
+
+
+        function ensureSculptAdjacency(geometry) {
+            if (!geometry || !geometry.attributes || !geometry.attributes.position) return null;
+            const posAttr = geometry.attributes.position;
+            const indexLen = geometry.index ? geometry.index.array.length : 0;
+            const versionKey = `${posAttr.count}|${indexLen}`;
+            const cached = sculptAdjacencyCache.get(geometry);
+            if (cached && cached.key === versionKey) return cached.value;
+
+            const positions = posAttr.array;
+            const count = posAttr.count;
+            const indices = geometry.index ? geometry.index.array : null;
+            const keyToId = new Map();
+            const vertexToId = new Int32Array(count);
+            const idToVertex = [];
+            for (let i = 0; i < count; i++) {
+                const px = positions[i * 3];
+                const py = positions[i * 3 + 1];
+                const pz = positions[i * 3 + 2];
+                const k = `${Math.round(px * 100000)}|${Math.round(py * 100000)}|${Math.round(pz * 100000)}`;
+                let id = keyToId.get(k);
+                if (id === undefined) {
+                    id = idToVertex.length;
+                    keyToId.set(k, id);
+                    idToVertex.push(i);
+                }
+                vertexToId[i] = id;
+            }
+            const adjSets = Array.from({ length: idToVertex.length }, () => new Set());
+            const triCount = indices ? Math.floor(indices.length / 3) : Math.floor(count / 3);
+            for (let t = 0; t < triCount; t++) {
+                const a = vertexToId[indices ? indices[t * 3]     : t * 3];
+                const b = vertexToId[indices ? indices[t * 3 + 1] : t * 3 + 1];
+                const c = vertexToId[indices ? indices[t * 3 + 2] : t * 3 + 2];
+                if (a !== b) { adjSets[a].add(b); adjSets[b].add(a); }
+                if (b !== c) { adjSets[b].add(c); adjSets[c].add(b); }
+                if (a !== c) { adjSets[a].add(c); adjSets[c].add(a); }
+            }
+            const adj = adjSets.map((s) => Int32Array.from(s));
+            const adjacency = { vertexToId, idToVertex, adj };
+            sculptAdjacencyCache.set(geometry, { key: versionKey, value: adjacency });
+            return adjacency;
+        }
+
+
+        function sculptFalloff(t) {
+            const x = Math.max(0, Math.min(1, t));
+            return x * x * (3 - 2 * x);
+        }
+
+
+        function applySculptStrokeAt(mesh, hitWorldPoint, opts = {}) {
+            if (!isSculptable(mesh)) return;
+            const geometry = mesh.geometry;
+            const posAttr = geometry.attributes.position;
+            const positions = posAttr.array;
+            const count = posAttr.count;
+            const adjacency = ensureSculptAdjacency(geometry);
+            if (!adjacency) return;
+
+            mesh.updateMatrixWorld();
+            const inv = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+            const hitLocal = hitWorldPoint.clone().applyMatrix4(inv);
+
+            const worldScale = new THREE.Vector3();
+            mesh.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), worldScale);
+            const scaleMag = (Math.abs(worldScale.x) + Math.abs(worldScale.y) + Math.abs(worldScale.z)) / 3;
+            const radius = opts.radius != null ? opts.radius : sculptState.radius;
+            const localRadius = radius / Math.max(scaleMag, 0.0001);
+            const radiusSq = localRadius * localRadius;
+            const strength = opts.strength != null ? opts.strength : sculptState.strength;
+            const brush = opts.brush || sculptState.brush;
+
+            const affected = new Map();
+            for (let i = 0; i < count; i++) {
+                const dx = positions[i * 3] - hitLocal.x;
+                const dy = positions[i * 3 + 1] - hitLocal.y;
+                const dz = positions[i * 3 + 2] - hitLocal.z;
+                const dSq = dx * dx + dy * dy + dz * dz;
+                if (dSq <= radiusSq) {
+                    const id = adjacency.vertexToId[i];
+                    const d = Math.sqrt(dSq);
+                    const prev = affected.get(id);
+                    if (prev === undefined || d < prev) affected.set(id, d);
+                }
+            }
+            if (!affected.size) return;
+
+            const newPosById = new Map();
+
+            if (brush === "grab") {
+                const prev = opts.previousHitLocal;
+                if (!prev) return;
+                const dx = hitLocal.x - prev.x;
+                const dy = hitLocal.y - prev.y;
+                const dz = hitLocal.z - prev.z;
+                affected.forEach((d, id) => {
+                    const w = sculptFalloff(1 - d / localRadius) * strength;
+                    const repIdx = adjacency.idToVertex[id];
+                    newPosById.set(id, {
+                        x: positions[repIdx * 3] + dx * w,
+                        y: positions[repIdx * 3 + 1] + dy * w,
+                        z: positions[repIdx * 3 + 2] + dz * w
+                    });
+                });
+            } else if (brush === "inflate" || brush === "crease") {
+                ensureOutlineNormalAttribute(geometry);
+                const sourceNorm = geometry.attributes.outlineNormal
+                    ? geometry.attributes.outlineNormal.array
+                    : (geometry.attributes.normal ? geometry.attributes.normal.array : null);
+                const sign = brush === "inflate" ? 1 : -1;
+                affected.forEach((d, id) => {
+                    const w = sculptFalloff(1 - d / localRadius) * strength;
+                    const repIdx = adjacency.idToVertex[id];
+                    let nx = 0, ny = 1, nz = 0;
+                    if (sourceNorm) {
+                        nx = sourceNorm[repIdx * 3];
+                        ny = sourceNorm[repIdx * 3 + 1];
+                        nz = sourceNorm[repIdx * 3 + 2];
+                    }
+                    const push = sign * w * localRadius * 0.25;
+                    newPosById.set(id, {
+                        x: positions[repIdx * 3] + nx * push,
+                        y: positions[repIdx * 3 + 1] + ny * push,
+                        z: positions[repIdx * 3 + 2] + nz * push
+                    });
+                });
+            } else if (brush === "smooth") {
+                affected.forEach((d, id) => {
+                    const w = sculptFalloff(1 - d / localRadius) * strength;
+                    const repIdx = adjacency.idToVertex[id];
+                    const neighbors = adjacency.adj[id];
+                    const px = positions[repIdx * 3];
+                    const py = positions[repIdx * 3 + 1];
+                    const pz = positions[repIdx * 3 + 2];
+                    if (!neighbors.length) {
+                        newPosById.set(id, { x: px, y: py, z: pz });
+                        return;
+                    }
+                    let cx = 0, cy = 0, cz = 0;
+                    for (let k = 0; k < neighbors.length; k++) {
+                        const nrep = adjacency.idToVertex[neighbors[k]];
+                        cx += positions[nrep * 3];
+                        cy += positions[nrep * 3 + 1];
+                        cz += positions[nrep * 3 + 2];
+                    }
+                    cx /= neighbors.length;
+                    cy /= neighbors.length;
+                    cz /= neighbors.length;
+                    newPosById.set(id, {
+                        x: px + (cx - px) * w,
+                        y: py + (cy - py) * w,
+                        z: pz + (cz - pz) * w
+                    });
+                });
+            }
+
+            for (let i = 0; i < count; i++) {
+                const id = adjacency.vertexToId[i];
+                const np = newPosById.get(id);
+                if (np) {
+                    positions[i * 3] = np.x;
+                    positions[i * 3 + 1] = np.y;
+                    positions[i * 3 + 2] = np.z;
+                }
+            }
+            posAttr.needsUpdate = true;
+        }
+
+
+        function mirrorWorldPointAcrossLocalX(mesh, worldPoint) {
+            mesh.updateMatrixWorld();
+            const inv = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+            const local = worldPoint.clone().applyMatrix4(inv);
+            local.x = -local.x;
+            return local.applyMatrix4(mesh.matrixWorld);
+        }
+
+
+        function updateSculptBrushIndicator(mesh, worldPoint) {
+            const camDir = camera.getWorldDirection(new THREE.Vector3());
+            sculptBrushIndicator.position.copy(worldPoint);
+            sculptBrushIndicator.scale.setScalar(sculptState.radius);
+            sculptBrushIndicator.lookAt(worldPoint.clone().add(camDir));
+            sculptBrushIndicator.visible = true;
+            if (sculptState.symmetryX && mesh) {
+                const mirror = mirrorWorldPointAcrossLocalX(mesh, worldPoint);
+                sculptBrushIndicatorMirror.position.copy(mirror);
+                sculptBrushIndicatorMirror.scale.setScalar(sculptState.radius);
+                sculptBrushIndicatorMirror.lookAt(mirror.clone().add(camDir));
+                sculptBrushIndicatorMirror.visible = true;
+            } else {
+                sculptBrushIndicatorMirror.visible = false;
+            }
+        }
+
+
+        function hideSculptBrushIndicator() {
+            sculptBrushIndicator.visible = false;
+            sculptBrushIndicatorMirror.visible = false;
+        }
+
+
+        function performSculptStrokeStep(clientX, clientY) {
+            const mesh = sculptState.stroke && sculptState.stroke.mesh;
+            if (!isSculptable(mesh)) return;
+            pointer.x = (clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObject(mesh, false);
+            if (!hits.length) {
+                hideSculptBrushIndicator();
+                return;
+            }
+            const hit = hits[0];
+            const hitWorldPoint = hit.point.clone();
+            mesh.updateMatrixWorld();
+            const inv = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+            const hitLocal = hitWorldPoint.clone().applyMatrix4(inv);
+            const previousHitLocal = sculptState.stroke.lastHitLocal ? sculptState.stroke.lastHitLocal.clone() : null;
+            const opts = {
+                radius: sculptState.radius,
+                strength: sculptState.strength,
+                brush: sculptState.brush,
+                previousHitLocal: previousHitLocal
+            };
+
+            const isFirstGrabStep = sculptState.brush === "grab" && !previousHitLocal;
+            if (!isFirstGrabStep) {
+                applySculptStrokeAt(mesh, hitWorldPoint, opts);
+                if (sculptState.symmetryX) {
+                    const mirrorWorld = mirrorWorldPointAcrossLocalX(mesh, hitWorldPoint);
+                    const mirrorPrev = previousHitLocal
+                        ? new THREE.Vector3(-previousHitLocal.x, previousHitLocal.y, previousHitLocal.z)
+                        : null;
+                    applySculptStrokeAt(mesh, mirrorWorld, { ...opts, previousHitLocal: mirrorPrev });
+                }
+                sculptState.stroke.dirty = true;
+            }
+            sculptState.stroke.lastHitLocal = hitLocal;
+            sculptState.stroke.lastHitWorld = hitWorldPoint;
+            updateSculptBrushIndicator(mesh, hitWorldPoint);
+        }
+
+
+        function startSculptStroke(clientX, clientY) {
+            if (editMode !== "sculpt") return;
+            if (!isSculptable(selectedObject)) {
+                setStatus("Select a mesh to sculpt");
+                return;
+            }
+            sculptState.stroke = { mesh: selectedObject, lastHitLocal: null, lastHitWorld: null, dirty: false };
+            orbit.enabled = false;
+            performSculptStrokeStep(clientX, clientY);
+        }
+
+
+        function updateSculptStroke(clientX, clientY) {
+            if (!sculptState.stroke) return;
+            performSculptStrokeStep(clientX, clientY);
+        }
+
+
+        function endSculptStroke() {
+            if (!sculptState.stroke) return;
+            const mesh = sculptState.stroke.mesh;
+            const dirty = sculptState.stroke.dirty;
+            sculptState.stroke = null;
+            orbit.enabled = true;
+            if (dirty && mesh && mesh.geometry) {
+                mesh.geometry.computeVertexNormals();
+                if (mesh.geometry.attributes.normal) mesh.geometry.attributes.normal.needsUpdate = true;
+                if (mesh.geometry.userData) mesh.geometry.userData.outlineNormalVersion = null;
+                if (typeof recordHistory === "function") recordHistory();
+                setStatus(`Sculpt • ${sculptState.brush}`);
+            }
+            hideSculptBrushIndicator();
+        }
+
+
+        function sculptHoverPreview(clientX, clientY) {
+            if (editMode !== "sculpt" || !isSculptable(selectedObject)) {
+                hideSculptBrushIndicator();
+                return;
+            }
+            pointer.x = (clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObject(selectedObject, false);
+            if (hits.length) updateSculptBrushIndicator(selectedObject, hits[0].point);
+            else hideSculptBrushIndicator();
+        }
+
+
+        function setSculptBrush(name) {
+            if (!["grab", "smooth", "inflate", "crease"].includes(name)) return;
+            sculptState.brush = name;
+            updateUI();
+            setStatus(`Brush • ${name}`);
+        }
+
+
+        function adjustSculptRadius(delta) {
+            const next = Math.max(0.05, Math.min(3, Math.round((sculptState.radius + delta) * 100) / 100));
+            sculptState.radius = next;
+            updateUI();
+            setStatus(`Radius ${next.toFixed(2)}`);
+        }
+
+
+        function adjustSculptStrength(delta) {
+            const next = Math.max(0.05, Math.min(1, Math.round((sculptState.strength + delta) * 100) / 100));
+            sculptState.strength = next;
+            updateUI();
+            setStatus(`Strength ${next.toFixed(2)}`);
+        }
+
+
+        function toggleSculptSymmetryX() {
+            sculptState.symmetryX = !sculptState.symmetryX;
+            updateUI();
+            setStatus(`Symmetry X • ${sculptState.symmetryX ? "on" : "off"}`);
+        }
+
+
+        /* =========================================================
            6) DRAG LOCKS
         ========================================================= */
 
@@ -3461,7 +3844,7 @@
                 ? [...new Set(input.selectedIds.map(Number).filter(id => idSet.has(id)))]
                 : [];
             const primaryId = idSet.has(Number(input.primaryId)) ? Number(input.primaryId) : null;
-            const editMode = ["object", "vertex", "face"].includes(input.editMode) ? input.editMode : "object";
+            const editMode = ["object", "vertex", "face", "sculpt"].includes(input.editMode) ? input.editMode : "object";
             const transformMode = ["translate", "rotate", "scale"].includes(input.transformMode) ? input.transformMode : "translate";
             const axisLock = ["x", "y", "z"].includes(input.axisLock) ? input.axisLock : null;
             const nextId = Math.max(Number(input.nextId) || 1, ...nodes.map(node => node.id + 1), 1);
@@ -4188,6 +4571,29 @@
                 label: "Mesh",
                 groups: []
             },
+            sculpt: {
+                label: "Sculpt",
+                groups: [
+                    [
+                        { action: "sculptBrushGrab", icon: "✋", label: "Grab", active: () => sculptState.brush === "grab" },
+                        { action: "sculptBrushSmooth", icon: "≈", label: "Smooth", active: () => sculptState.brush === "smooth" },
+                        { action: "sculptBrushInflate", icon: "◈", label: "Inflate", active: () => sculptState.brush === "inflate" },
+                        { action: "sculptBrushCrease", icon: "◊", label: "Crease", active: () => sculptState.brush === "crease" }
+                    ],
+                    [
+                        { action: "sculptRadiusDown", icon: "－", label: "R-" },
+                        { action: "sculptRadiusReadout", icon: "◯", label: () => `Radius ${sculptState.radius.toFixed(2)}` },
+                        { action: "sculptRadiusUp", icon: "＋", label: "R+" },
+                        { action: "sculptStrengthDown", icon: "－", label: "S-" },
+                        { action: "sculptStrengthReadout", icon: "↯", label: () => `Strength ${sculptState.strength.toFixed(2)}` },
+                        { action: "sculptStrengthUp", icon: "＋", label: "S+" }
+                    ],
+                    [
+                        { action: "sculptToggleSymmetryX", icon: "⇄", label: "Symmetry X", active: () => sculptState.symmetryX },
+                        { action: "sculptObjectReturn", icon: "□", label: "Object" }
+                    ]
+                ]
+            },
             hierarchy: {
                 label: "Hierarchy",
                 groups: [
@@ -4340,7 +4746,13 @@
                 setEditMode("face");
                 return;
             }
-            if (mode === "select" && (editMode === "vertex" || editMode === "face")) {
+            if (mode === "sculpt") {
+                setEditMode("sculpt");
+                renderContextDock();
+                updateUI();
+                return;
+            }
+            if (mode === "select" && (editMode === "vertex" || editMode === "face" || editMode === "sculpt")) {
                 setEditMode("object");
                 return;
             }
@@ -4359,11 +4771,15 @@
             } else {
                 html += config.groups.map((group) => `
                     <div class="bottom-group">
-                        ${group.map((item) => `
+                        ${group.map((item) => {
+                            const itemLabel = typeof item.label === "function" ? item.label() : item.label;
+                            const itemIcon = typeof item.icon === "function" ? item.icon() : item.icon;
+                            return `
                             <button class="bottom-btn${item.active && item.active() ? ' active' : ''}" data-action="${item.action}">
-                                <span class="bottom-icon">${item.icon}</span>${item.label}
+                                <span class="bottom-icon">${itemIcon}</span>${itemLabel}
                             </button>
-                        `).join("")}
+                        `;
+                        }).join("")}
                     </div>
                 `).join("");
             }
@@ -5327,16 +5743,21 @@
             const topModeChip = document.getElementById("topModeChip");
 
 
-            const modeLabel = editMode === "vertex" ? "Vertex" : editMode === "face" ? "Face" : "Object";
+            const modeLabel = editMode === "vertex" ? "Vertex"
+                : editMode === "face" ? "Face"
+                : editMode === "sculpt" ? "Sculpt"
+                : "Object";
             const toolLabel = editMode === "vertex"
                 ? "Move"
                 : editMode === "face"
                     ? (selectedFaceData ? "Face Sel" : "Pick Face")
-                    : transformMode === "translate"
-                        ? "Move"
-                        : transformMode === "rotate"
-                            ? "Rotate"
-                            : "Scale";
+                    : editMode === "sculpt"
+                        ? `${sculptState.brush[0].toUpperCase() + sculptState.brush.slice(1)}${sculptState.symmetryX ? " · sym" : ""}`
+                        : transformMode === "translate"
+                            ? "Move"
+                            : transformMode === "rotate"
+                                ? "Rotate"
+                                : "Scale";
             const axisLabel = axisLock ? axisLock.toUpperCase() : "Free";
 
 
@@ -6380,7 +6801,8 @@
             }
 
 
-            if ((editMode === "vertex" || editMode === "face") && !isRenderable(selectedObject)) {
+            if ((editMode === "vertex" || editMode === "face" || editMode === "sculpt") && !isRenderable(selectedObject)) {
+                if (editMode === "sculpt") { endSculptStroke(); hideSculptBrushIndicator(); }
                 editMode = "object";
             }
 
@@ -6445,17 +6867,25 @@
 
 
         function setEditMode(mode) {
-            if ((mode === "vertex" || mode === "face") && (!selectedObject || !isRenderable(selectedObject))) {
+            if ((mode === "vertex" || mode === "face" || mode === "sculpt") && (!selectedObject || !isRenderable(selectedObject))) {
                 editMode = "object";
                 clearVertexHandles();
                 clearSelectedFace();
+                hideSculptBrushIndicator();
                 if (selectedObject) {
                     transform.attach(selectedObject);
                     transform.setMode(transformMode);
                 }
                 updateUI();
-                setStatus(`${mode === "vertex" ? "Vertex" : "Face"} mode needs a mesh`);
+                const needLabel = mode === "vertex" ? "Vertex" : mode === "face" ? "Face" : "Sculpt";
+                setStatus(`${needLabel} mode needs a mesh`);
                 return;
+            }
+
+
+            if (editMode === "sculpt" && mode !== "sculpt") {
+                endSculptStroke();
+                hideSculptBrushIndicator();
             }
 
 
@@ -6482,6 +6912,11 @@
                 transform.detach();
                 refreshFaceSelectionVisuals();
                 setStatus(selectedFaceData ? "Face selected" : "Tap a face");
+            } else if (mode === "sculpt") {
+                clearVertexHandles();
+                clearSelectedFace();
+                transform.detach();
+                setStatus("Sculpt mode • drag on mesh to brush");
             }
 
 
@@ -8567,6 +9002,18 @@
 
                 case "objectMode": setEditMode("object"); break;
                 case "vertexMode": setDockMode("edit"); setEditMode("vertex"); break;
+                case "sculptBrushGrab": setSculptBrush("grab"); break;
+                case "sculptBrushSmooth": setSculptBrush("smooth"); break;
+                case "sculptBrushInflate": setSculptBrush("inflate"); break;
+                case "sculptBrushCrease": setSculptBrush("crease"); break;
+                case "sculptRadiusUp": adjustSculptRadius(0.05); break;
+                case "sculptRadiusDown": adjustSculptRadius(-0.05); break;
+                case "sculptRadiusReadout": break;
+                case "sculptStrengthUp": adjustSculptStrength(0.05); break;
+                case "sculptStrengthDown": adjustSculptStrength(-0.05); break;
+                case "sculptStrengthReadout": break;
+                case "sculptToggleSymmetryX": toggleSculptSymmetryX(); break;
+                case "sculptObjectReturn": setDockMode("select"); setEditMode("object"); break;
                 case "toggleSnap": toggleSnap(); break;
                 case "moveMode": setTransformMode("translate"); break;
                 case "vertexInsert": vertexInsertSelected(); break;
@@ -9012,10 +9459,18 @@
                 y: e.clientY,
                 time: performance.now()
             };
+            if (editMode === "sculpt" && (e.button === 0 || e.button === undefined)) {
+                startSculptStroke(e.clientX, e.clientY);
+            }
         });
 
 
         renderer.domElement.addEventListener("pointerup", (e) => {
+            if (editMode === "sculpt" && sculptState.stroke) {
+                endSculptStroke();
+                pointerTapState = null;
+                return;
+            }
             if (!pointerTapState) return;
 
 
@@ -9058,6 +9513,14 @@
 
 
         renderer.domElement.addEventListener("pointermove", (e) => {
+            if (editMode === "sculpt") {
+                if (sculptState.stroke) {
+                    updateSculptStroke(e.clientX, e.clientY);
+                } else if (e.buttons === 0) {
+                    sculptHoverPreview(e.clientX, e.clientY);
+                }
+                return;
+            }
             if (!faceCutPreviewEnabled || editMode !== "face" || suppressNextPick) return;
             if (e.pointerType !== "mouse" && e.buttons !== 1) return;
             pickObject(e.clientX, e.clientY, { previewOnly: true });
@@ -9065,6 +9528,10 @@
 
 
         renderer.domElement.addEventListener("pointerleave", () => {
+            if (editMode === "sculpt") {
+                if (sculptState.stroke) endSculptStroke();
+                hideSculptBrushIndicator();
+            }
             pointerTapState = null;
             if (faceCutHover) {
                 faceCutHover = null;
@@ -9074,6 +9541,7 @@
 
 
         renderer.domElement.addEventListener("pointercancel", () => {
+            if (editMode === "sculpt" && sculptState.stroke) endSculptStroke();
             pointerTapState = null;
         });
 
