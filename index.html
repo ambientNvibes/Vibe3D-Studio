@@ -3535,9 +3535,14 @@
             }
             const oldGeom = mesh.geometry;
             mesh.geometry = next;
-            // Loop subdivision invalidates shared-quad metadata
+            // Loop subdivision invalidates shared-quad metadata and primitive type
+            // (subdivided positions no longer follow the cube/plane shared layout, so
+            // history restore must use the generic position-array path)
             if (mesh.userData) {
                 mesh.userData.sharedTopologyPrimitive = null;
+                if (mesh.userData.type === "cube" || mesh.userData.type === "plane") {
+                    mesh.userData.type = "mesh";
+                }
             }
             if (oldGeom && oldGeom !== next) {
                 if (oldGeom.userData) oldGeom.userData.sculptAdjacency = null;
