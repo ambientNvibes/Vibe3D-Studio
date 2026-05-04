@@ -3649,7 +3649,8 @@
             twist: 0,
             color: "#2a1c14",
             fanCount: 7,
-            fanSpread: Math.PI * 0.7
+            fanSpread: Math.PI * 0.7,
+            tiltUp: 0.6
         };
 
 
@@ -3842,8 +3843,18 @@
             else if (type === "bangs") node = buildHairBangsNode();
             else return false;
 
+            // Growth direction blends the surface normal with a world-up bias.
+            // tiltUp in [-1, +1]: +1 = pure world up (spiky), 0 = pure surface normal,
+            // -1 = pure world down (hanging). Magnitude controls how strongly the bias wins.
+            const tilt = Math.max(-1, Math.min(1, Number(hairCardState.tiltUp) || 0));
+            const blend = Math.abs(tilt);
+            const biasAxis = new THREE.Vector3(0, tilt >= 0 ? 1 : -1, 0);
+            const growthDir = worldNormal.clone().multiplyScalar(1 - blend)
+                .add(biasAxis.multiplyScalar(blend))
+                .normalize();
+            if (growthDir.lengthSq() < 1e-6) growthDir.copy(worldNormal);
             const upY = new THREE.Vector3(0, 1, 0);
-            const quat = new THREE.Quaternion().setFromUnitVectors(upY, worldNormal);
+            const quat = new THREE.Quaternion().setFromUnitVectors(upY, growthDir);
             node.quaternion.copy(quat);
             node.position.copy(worldPoint);
 
@@ -3940,6 +3951,18 @@
             hairCardState.segments = Math.max(2, Math.min(40, hairCardState.segments + d));
             updateUI();
             setStatus(`Hair segments ${hairCardState.segments}`);
+        }
+
+
+        function adjustHairTilt(d) {
+            hairCardState.tiltUp = Math.max(-1, Math.min(1, Math.round((hairCardState.tiltUp + d) * 100) / 100));
+            updateUI();
+            const direction = hairCardState.tiltUp > 0.05
+                ? "upward"
+                : hairCardState.tiltUp < -0.05
+                    ? "downward"
+                    : "along normal";
+            setStatus(`Hair tilt ${hairCardState.tiltUp.toFixed(2)} • ${direction}`);
         }
 
 
@@ -5200,6 +5223,15 @@
                         { action: "hairSegmentsDown", icon: "－", label: "S-" },
                         { action: "hairSegmentsReadout", icon: "≡", label: () => `Seg ${hairCardState.segments}` },
                         { action: "hairSegmentsUp", icon: "＋", label: "S+" }
+                    ],
+                    [
+                        { action: "hairTiltDown", icon: "↓", label: "Tilt-" },
+                        { action: "hairTiltReadout", icon: "↥", label: () => {
+                            const t = hairCardState.tiltUp;
+                            const dir = t > 0.05 ? "up" : t < -0.05 ? "down" : "normal";
+                            return `Tilt ${t.toFixed(2)} · ${dir}`;
+                        } },
+                        { action: "hairTiltUp", icon: "↑", label: "Tilt+" }
                     ]
                 ]
             },
@@ -9684,6 +9716,9 @@
                 case "hairSegmentsDown": adjustHairSegments(-1); break;
                 case "hairSegmentsUp": adjustHairSegments(1); break;
                 case "hairSegmentsReadout": break;
+                case "hairTiltDown": adjustHairTilt(-0.1); break;
+                case "hairTiltUp": adjustHairTilt(0.1); break;
+                case "hairTiltReadout": break;
                 case "toggleSnap": toggleSnap(); break;
                 case "moveMode": setTransformMode("translate"); break;
                 case "vertexInsert": vertexInsertSelected(); break;
