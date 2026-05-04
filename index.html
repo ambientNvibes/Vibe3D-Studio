@@ -3718,25 +3718,28 @@
         }
 
 
-        const hairPlacementState = {
-            type: null,
-            targetMesh: null
-        };
-
-
-        function buildHairStrandNode() {
+        function spawnHairStrand() {
             const strand = makeHairStrand(hairCardState);
             assignNodeIdentity(strand, "mesh", `Hair_${nextId}`);
-            return strand;
+            contentRoot.add(strand);
+            if (selectedObject && isHierarchyNode(selectedObject)) {
+                strand.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
+                strand.position.y += 0.05;
+            }
+            selectObject(strand);
+            recordHistory();
+            setStatus(`Hair strand added`);
+            updateUI();
         }
 
 
-        function buildHairFanNode() {
+        function spawnHairFan() {
             const group = makeGroupNode("HairFan");
             assignNodeIdentity(group, "group", `HairFan_${nextId}`);
             const count = Math.max(2, Math.min(24, hairCardState.fanCount | 0));
             const spread = hairCardState.fanSpread;
             const radius = hairCardState.length * 0.18;
+
             for (let i = 0; i < count; i++) {
                 const t = count === 1 ? 0.5 : i / (count - 1);
                 const angle = (t - 0.5) * spread;
@@ -3752,15 +3755,25 @@
                 strand.rotation.y = angle;
                 group.add(strand);
             }
-            return group;
+
+            contentRoot.add(group);
+            if (selectedObject && isHierarchyNode(selectedObject)) {
+                group.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
+                group.position.y += 0.5;
+            }
+            selectObject(group);
+            recordHistory();
+            setStatus(`Hair fan added • ${count} strands`);
+            updateUI();
         }
 
 
-        function buildHairBangsNode() {
+        function spawnHairBangs() {
             const group = makeGroupNode("HairBangs");
             assignNodeIdentity(group, "group", `HairBangs_${nextId}`);
             const count = Math.max(3, hairCardState.fanCount | 0);
             const spread = Math.PI * 0.95;
+
             for (let i = 0; i < count; i++) {
                 const t = count === 1 ? 0.5 : i / (count - 1);
                 const angle = (t - 0.5) * spread;
@@ -3768,135 +3781,25 @@
                 const params = {
                     ...hairCardState,
                     length: hairCardState.length * Math.max(0.4, dropoff),
-                    bend: hairCardState.bend * 1.6,
+                    bend: hairCardState.bend * 1.4,
                     widthBase: hairCardState.widthBase * 0.85
                 };
                 const strand = makeHairStrand(params);
                 assignNodeIdentity(strand, "mesh", `Bang_${nextId}`);
-                strand.position.set(Math.sin(angle) * 0.18, 0, -Math.cos(angle) * 0.08);
-                strand.rotation.y = angle;
+                strand.position.set(Math.sin(angle) * 0.32, 0.05, -Math.cos(angle) * 0.08);
+                strand.rotation.x = Math.PI;
+                strand.rotation.z = -angle * 0.4;
                 group.add(strand);
             }
-            return group;
-        }
 
-
-        function enterHairPlacement(type) {
-            if (!["strand", "fan", "bangs"].includes(type)) return;
-            // Toggle off if same type is already armed
-            if (hairPlacementState.type === type) {
-                cancelHairPlacement();
-                return;
-            }
-            // If a sculptable mesh is selected, arm placement mode
-            if (isSculptable(selectedObject)) {
-                if (editMode === "sculpt") setEditMode("object");
-                hairPlacementState.type = type;
-                hairPlacementState.targetMesh = selectedObject;
-                renderer.domElement.style.cursor = "crosshair";
-                setStatus(`Plant ${type} • click on ${selectedObject.userData.name} (Esc to cancel)`);
-                updateUI();
-                return;
-            }
-            // Fallback: spawn at origin / above current selection center
-            if (type === "strand") spawnHairStrand();
-            else if (type === "fan") spawnHairFan();
-            else if (type === "bangs") spawnHairBangs();
-        }
-
-
-        function cancelHairPlacement() {
-            if (!hairPlacementState.type) return;
-            hairPlacementState.type = null;
-            hairPlacementState.targetMesh = null;
-            renderer.domElement.style.cursor = "";
-            setStatus("Hair placement cancelled");
-            updateUI();
-        }
-
-
-        function plantHairAtSurface(clientX, clientY) {
-            const target = hairPlacementState.targetMesh;
-            const type = hairPlacementState.type;
-            if (!target || !type) return false;
-            pointer.x = (clientX / window.innerWidth) * 2 - 1;
-            pointer.y = -(clientY / window.innerHeight) * 2 + 1;
-            raycaster.setFromCamera(pointer, camera);
-            const hits = raycaster.intersectObject(target, false);
-            if (!hits.length) {
-                setStatus(`Click on ${target.userData.name} to plant hair`);
-                return false;
-            }
-            const hit = hits[0];
-            const worldPoint = hit.point.clone();
-            const worldNormal = new THREE.Vector3(0, 1, 0);
-            if (hit.face) {
-                worldNormal.copy(hit.face.normal);
-                const normalMatrix = new THREE.Matrix3().getNormalMatrix(target.matrixWorld);
-                worldNormal.applyMatrix3(normalMatrix).normalize();
-            }
-
-            let node;
-            if (type === "strand") node = buildHairStrandNode();
-            else if (type === "fan") node = buildHairFanNode();
-            else if (type === "bangs") node = buildHairBangsNode();
-            else return false;
-
-            const upY = new THREE.Vector3(0, 1, 0);
-            const quat = new THREE.Quaternion().setFromUnitVectors(upY, worldNormal);
-            node.quaternion.copy(quat);
-            node.position.copy(worldPoint);
-
-            // Stage in world space, then re-parent under target preserving world transform
-            contentRoot.add(node);
-            target.attach(node);
-
-            selectObject(node);
-            recordHistory();
-            setStatus(`Planted ${type} on ${target.userData.name}`);
-            updateUI();
-            return true;
-        }
-
-
-        function spawnHairStrand() {
-            const node = buildHairStrandNode();
-            contentRoot.add(node);
+            contentRoot.add(group);
             if (selectedObject && isHierarchyNode(selectedObject)) {
-                node.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
-                node.position.y += 0.05;
+                group.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
+                group.position.y += 0.5;
             }
-            selectObject(node);
+            selectObject(group);
             recordHistory();
-            setStatus(`Hair strand added`);
-            updateUI();
-        }
-
-
-        function spawnHairFan() {
-            const node = buildHairFanNode();
-            contentRoot.add(node);
-            if (selectedObject && isHierarchyNode(selectedObject)) {
-                node.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
-                node.position.y += 0.5;
-            }
-            selectObject(node);
-            recordHistory();
-            setStatus(`Hair fan added`);
-            updateUI();
-        }
-
-
-        function spawnHairBangs() {
-            const node = buildHairBangsNode();
-            contentRoot.add(node);
-            if (selectedObject && isHierarchyNode(selectedObject)) {
-                node.position.copy(selectedObject.getWorldPosition(new THREE.Vector3()));
-                node.position.y += 0.5;
-            }
-            selectObject(node);
-            recordHistory();
-            setStatus(`Bangs added`);
+            setStatus(`Bangs added • ${count} strands`);
             updateUI();
         }
 
@@ -5172,10 +5075,9 @@
                 label: "Hair",
                 groups: [
                     [
-                        { action: "spawnHairStrand", icon: "ǁ", label: () => hairPlacementState.type === "strand" ? "Click target" : "Strand", active: () => hairPlacementState.type === "strand" },
-                        { action: "spawnHairFan", icon: "≣", label: () => hairPlacementState.type === "fan" ? "Click target" : "Fan", active: () => hairPlacementState.type === "fan" },
-                        { action: "spawnHairBangs", icon: "⁂", label: () => hairPlacementState.type === "bangs" ? "Click target" : "Bangs", active: () => hairPlacementState.type === "bangs" },
-                        { action: "cancelHairPlacement", icon: "✕", label: "Cancel", active: () => !!hairPlacementState.type }
+                        { action: "spawnHairStrand", icon: "ǁ", label: "Strand" },
+                        { action: "spawnHairFan", icon: "≣", label: "Fan" },
+                        { action: "spawnHairBangs", icon: "⁂", label: "Bangs" }
                     ],
                     [
                         { action: "hairLengthDown", icon: "－", label: "L-" },
@@ -5364,7 +5266,6 @@
         }
         function setDockMode(mode) {
             if (!dockModeDefinitions[mode]) return;
-            if (hairPlacementState.type && mode !== "hair") cancelHairPlacement();
             uiDockMode = mode;
             if (mode === "edit") {
                 if (editMode === "face") {
@@ -9662,10 +9563,9 @@
                 case "subdivideMesh": subdivideSelectedMesh(); break;
                 case "sculptObjectReturn": setDockMode("select"); setEditMode("object"); break;
 
-                case "spawnHairStrand": enterHairPlacement("strand"); break;
-                case "spawnHairFan": enterHairPlacement("fan"); break;
-                case "spawnHairBangs": enterHairPlacement("bangs"); break;
-                case "cancelHairPlacement": cancelHairPlacement(); break;
+                case "spawnHairStrand": spawnHairStrand(); break;
+                case "spawnHairFan": spawnHairFan(); break;
+                case "spawnHairBangs": spawnHairBangs(); break;
                 case "hairLengthDown": adjustHairLength(-0.05); break;
                 case "hairLengthUp": adjustHairLength(0.05); break;
                 case "hairLengthReadout": break;
@@ -10150,13 +10050,6 @@
             const elapsed = performance.now() - pointerTapState.time;
 
 
-            if (hairPlacementState.type && !suppressNextPick && dist < 10 && elapsed < 400) {
-                plantHairAtSurface(e.clientX, e.clientY);
-                pointerTapState = null;
-                return;
-            }
-
-
             if (!suppressNextPick && dist < 10 && elapsed < 260) {
                 const now = performance.now();
                 const doubleTap = lastCanvasTap
@@ -10220,14 +10113,6 @@
         renderer.domElement.addEventListener("pointercancel", () => {
             if (editMode === "sculpt" && sculptState.stroke) endSculptStroke();
             pointerTapState = null;
-        });
-
-
-        window.addEventListener("keydown", (e) => {
-            if (e.key === "Escape" && hairPlacementState.type) {
-                cancelHairPlacement();
-                e.preventDefault();
-            }
         });
 
 
