@@ -4104,8 +4104,12 @@
                 if (editMode === "vertex" && selectedVertexHandle) {
                     applySelectedVertexHandleDelta();
                     applySoftSelectionDelta();
-                    applySelectedVertexHandlesToGeometry();
+                    // Soft-affected handles must be written to geometry BEFORE
+                    // applySelectedVertexHandlesToGeometry runs, because that call
+                    // ends with syncVertexHandlesFromMesh which re-reads positions
+                    // from geometry and would otherwise reset soft-moved handles.
                     applySoftAffectedHandlesToGeometry();
+                    applySelectedVertexHandlesToGeometry();
                 }
                 const endSnapshot = createHistorySnapshot();
                 if (dragHistoryStart !== endSnapshot) {
@@ -4132,8 +4136,11 @@
                 selectedVertexHandles.forEach((handle) => {
                     if (handle !== selectedVertexHandle) enforceAxisLockOnVertexHandle(handle);
                 });
-                applySelectedVertexHandlesToGeometry();
+                // Write soft-affected handles to geometry first; the strict
+                // selection write that follows will run syncVertexHandlesFromMesh
+                // and would otherwise reset soft handles to their old positions.
                 applySoftAffectedHandlesToGeometry();
+                applySelectedVertexHandlesToGeometry();
             } else if (selectedObject) {
                 enforceAxisLockOnObject(selectedObject);
                 applyMultiSelectionTransformDelta();
@@ -5366,7 +5373,7 @@
                 setStatus("Vertex insert created a new inner quad");
                 return;
             }
-            setStatus("Select a quad face first, then use Insert");
+            setStatus("Insert needs a quad face — pick one in Face mode first, then return here");
         }
         function setDockMode(mode) {
             // Legacy alias: "edit" used to mean the vertex/face combo dock
@@ -7532,7 +7539,7 @@
 
             if (mode === "object") {
                 clearVertexHandles();
-                clearSelectedFace();
+                clearFaceOverlay();
                 if (selectedObject) {
                     transform.attach(selectedObject);
                     transform.setMode(transformMode);
@@ -7541,7 +7548,7 @@
                 }
                 setStatus(selectedObject ? `Selected ${selectedObject.userData.name}` : "Object mode");
             } else if (mode === "vertex") {
-                clearSelectedFace();
+                clearFaceOverlay();
                 transform.detach();
                 buildVertexHandles(selectedObject);
                 if (uiDockMode !== "vertex") uiDockMode = "vertex";
@@ -7553,7 +7560,7 @@
                 setStatus(selectedFaceData ? "Face selected" : "Tap a face");
             } else if (mode === "sculpt") {
                 clearVertexHandles();
-                clearSelectedFace();
+                clearFaceOverlay();
                 transform.detach();
                 sculptState.lastIndicatorWorld = null;
                 refreshSculptBrushIndicator();
