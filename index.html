@@ -1238,7 +1238,7 @@
                 <button class="mode-btn" data-dock-mode="face"><span class="mode-icon">⬒</span><span class="mode-text">Face</span></button>
                 <button class="mode-btn" data-dock-mode="add"><span class="mode-icon">✚</span><span class="mode-text">Add</span></button>
                 <button class="mode-btn" data-dock-mode="transform"><span class="mode-icon">✥</span><span class="mode-text">Transform</span></button>
-                <button class="mode-btn" data-dock-mode="edit"><span class="mode-icon">✎</span><span class="mode-text">Edit</span></button>
+                <button class="mode-btn" data-dock-mode="vertex"><span class="mode-icon">◉</span><span class="mode-text">Vertex</span></button>
                 <button class="mode-btn" data-dock-mode="sculpt"><span class="mode-icon">◍</span><span class="mode-text">Sculpt</span></button>
                 <button class="mode-btn" data-dock-mode="surface"><span class="mode-icon">◌</span><span class="mode-text">Surface</span></button>
                 <button class="mode-btn" data-dock-mode="view"><span class="mode-icon">⌘</span><span class="mode-text">View</span></button>
@@ -2780,12 +2780,30 @@
 
         function setVertexHandleActive(primaryHandle = null) {
             const selectedSet = new Set(selectedVertexHandles);
+            const softWeights = (typeof softSelectState !== "undefined" && softSelectState.enabled && primaryHandle)
+                ? getSoftSelectionWeights()
+                : null;
             vertexGroup.children.forEach((h) => {
                 const isSelected = selectedSet.has(h);
                 const isPrimary = h === primaryHandle;
-                h.material.color.set(isPrimary ? 0xffe8a3 : isSelected ? 0xf0d376 : 0x121417);
-                h.material.emissive.set(isPrimary ? 0x7b5d12 : isSelected ? 0x5b4711 : 0x3b2c08);
-                h.scale.setScalar(isPrimary ? 1.24 : isSelected ? 1.12 : 1);
+                if (isPrimary) {
+                    h.material.color.setHex(0xffe8a3);
+                    h.material.emissive.setHex(0x7b5d12);
+                    h.scale.setScalar(1.24);
+                } else if (isSelected) {
+                    h.material.color.setHex(0xf0d376);
+                    h.material.emissive.setHex(0x5b4711);
+                    h.scale.setScalar(1.12);
+                } else if (softWeights && softWeights.has(h)) {
+                    const w = softWeights.get(h);
+                    h.material.color.setRGB(0.10 + 0.55 * w, 0.08 + 0.46 * w, 0.04 + 0.16 * w);
+                    h.material.emissive.setRGB(0.18 + 0.40 * w, 0.13 + 0.30 * w, 0.04 + 0.06 * w);
+                    h.scale.setScalar(1 + 0.18 * w);
+                } else {
+                    h.material.color.setHex(0x121417);
+                    h.material.emissive.setHex(0x3b2c08);
+                    h.scale.setScalar(1);
+                }
             });
         }
 
@@ -2978,6 +2996,319 @@
 
 
             setVertexHandleActive(selectedVertexHandle);
+        }
+
+
+        /* =========================================================
+           5a) VERTEX SELECTION POWER (soft, box, grow/shrink)
+        ========================================================= */
+
+
+        const softSelectState = {
+            enabled: false,
+            radius: 0.5,
+            falloff: "smooth"
+        };
+
+
+        const boxSelectState = {
+            armed: false,
+            dragStart: null,
+            dragCurrent: null
+        };
+
+
+        function softSelectFalloff(t) {
+            const x = Math.max(0, Math.min(1, t));
+            switch (softSelectState.falloff) {
+                case "linear": return x;
+                case "sharp": return x * x * x;
+                case "smooth":
+                default: return x * x * (3 - 2 * x);
+            }
+        }
+
+
+        function getSoftSelectionWeights() {
+            const weights = new Map();
+            if (!softSelectState.enabled || !selectedVertexHandle) return weights;
+            const primary = selectedVertexHandle;
+            const mesh = primary.userData.mesh;
+            const radius = softSelectState.radius;
+            const radiusSq = radius * radius;
+            const selectedSet = new Set(selectedVertexHandles);
+            vertexGroup.children.forEach((handle) => {
+                if (handle === primary) return;
+                if (selectedSet.has(handle)) return;
+                if (handle.userData.mesh !== mesh) return;
+                const dSq = handle.position.distanceToSquared(primary.position);
+                if (dSq <= radiusSq) {
+                    const d = Math.sqrt(dSq);
+                    const w = softSelectFalloff(1 - d / radius);
+                    if (w > 0.001) weights.set(handle, w);
+                }
+            });
+            return weights;
+        }
+
+
+        function captureSoftSelectionStates() {
+            const states = [];
+            if (!softSelectState.enabled) return states;
+            const weights = getSoftSelectionWeights();
+            weights.forEach((w, handle) => {
+                states.push({ handle, position: handle.position.clone(), weight: w });
+            });
+            return states;
+        }
+
+
+        function applySoftSelectionDelta() {
+            const states = (dragOriginState && dragOriginState.softStates) || [];
+            if (!states.length || !dragOriginState || !selectedVertexHandle) return;
+            const delta = new THREE.Vector3().subVectors(selectedVertexHandle.position, dragOriginState.position);
+            states.forEach((entry) => {
+                entry.handle.position.copy(entry.position).addScaledVector(delta, entry.weight);
+            });
+        }
+
+
+        function applySoftAffectedHandlesToGeometry() {
+            const states = (dragOriginState && dragOriginState.softStates) || [];
+            if (!states.length) return;
+            const meshes = new Set();
+            states.forEach((entry) => {
+                const handle = entry.handle;
+                const mesh = handle && handle.userData && handle.userData.mesh;
+                const indices = handle && handle.userData && handle.userData.indices;
+                const pos = mesh && mesh.geometry && mesh.geometry.attributes && mesh.geometry.attributes.position;
+                if (!mesh || !indices || !pos) return;
+                const local = mesh.worldToLocal(handle.position.clone());
+                indices.forEach((index) => pos.setXYZ(index, local.x, local.y, local.z));
+                pos.needsUpdate = true;
+                meshes.add(mesh);
+            });
+            meshes.forEach((mesh) => {
+                mesh.geometry.computeVertexNormals();
+                if (mesh.geometry.userData) mesh.geometry.userData.outlineNormalVersion = null;
+            });
+        }
+
+
+        function toggleSoftSelect() {
+            softSelectState.enabled = !softSelectState.enabled;
+            if (selectedVertexHandle) setVertexHandleActive(selectedVertexHandle);
+            updateUI();
+            setStatus(`Soft selection ${softSelectState.enabled ? "on" : "off"}`);
+        }
+
+
+        function adjustSoftSelectRadius(d) {
+            softSelectState.radius = Math.max(0.05, Math.min(5, Math.round((softSelectState.radius + d) * 100) / 100));
+            if (selectedVertexHandle) setVertexHandleActive(selectedVertexHandle);
+            updateUI();
+            setStatus(`Soft radius ${softSelectState.radius.toFixed(2)}`);
+        }
+
+
+        function cycleSoftSelectFalloff() {
+            const order = ["smooth", "linear", "sharp"];
+            const i = order.indexOf(softSelectState.falloff);
+            softSelectState.falloff = order[(i + 1) % order.length];
+            if (selectedVertexHandle) setVertexHandleActive(selectedVertexHandle);
+            updateUI();
+            setStatus(`Soft falloff • ${softSelectState.falloff}`);
+        }
+
+
+        function selectAllVertexHandles() {
+            if (editMode !== "vertex" || !vertexGroup.children.length) return;
+            const all = vertexGroup.children.slice();
+            applyVertexSelection(all, selectedVertexHandle || all[0]);
+            setStatus(`Selected all ${all.length}`);
+        }
+
+
+        function invertVertexSelection() {
+            if (editMode !== "vertex") return;
+            const selectedSet = new Set(selectedVertexHandles);
+            const inverted = vertexGroup.children.filter((h) => !selectedSet.has(h));
+            applyVertexSelection(inverted, inverted[inverted.length - 1] || null);
+            setStatus(`Inverted • ${inverted.length} selected`);
+        }
+
+
+        function buildHandleAdjacencyMap(mesh) {
+            const adjacency = ensureSculptAdjacency(mesh.geometry);
+            if (!adjacency) return null;
+            const handleById = new Map();
+            vertexGroup.children.forEach((h) => {
+                if (h.userData.mesh !== mesh) return;
+                const repIdx = h.userData.indices[0];
+                const id = adjacency.vertexToId[repIdx];
+                if (id !== undefined) handleById.set(id, h);
+            });
+            return { adjacency, handleById };
+        }
+
+
+        function growVertexSelection() {
+            if (editMode !== "vertex" || !selectedVertexHandles.length) return;
+            const meshGroups = new Map();
+            const result = new Set(selectedVertexHandles);
+            selectedVertexHandles.forEach((handle) => {
+                const mesh = handle.userData.mesh;
+                if (!meshGroups.has(mesh)) {
+                    const ha = buildHandleAdjacencyMap(mesh);
+                    if (ha) meshGroups.set(mesh, ha);
+                }
+                const ha = meshGroups.get(mesh);
+                if (!ha) return;
+                const repIdx = handle.userData.indices[0];
+                const id = ha.adjacency.vertexToId[repIdx];
+                if (id === undefined) return;
+                const neighbors = ha.adjacency.adj[id];
+                for (let i = 0; i < neighbors.length; i++) {
+                    const nb = ha.handleById.get(neighbors[i]);
+                    if (nb) result.add(nb);
+                }
+            });
+            const arr = Array.from(result);
+            applyVertexSelection(arr, selectedVertexHandle || arr[0]);
+            setStatus(`Grow • ${arr.length} selected`);
+        }
+
+
+        function shrinkVertexSelection() {
+            if (editMode !== "vertex" || !selectedVertexHandles.length) return;
+            const selectedSet = new Set(selectedVertexHandles);
+            const meshGroups = new Map();
+            const survivors = [];
+            selectedVertexHandles.forEach((handle) => {
+                const mesh = handle.userData.mesh;
+                if (!meshGroups.has(mesh)) {
+                    const ha = buildHandleAdjacencyMap(mesh);
+                    if (ha) meshGroups.set(mesh, ha);
+                }
+                const ha = meshGroups.get(mesh);
+                if (!ha) { survivors.push(handle); return; }
+                const repIdx = handle.userData.indices[0];
+                const id = ha.adjacency.vertexToId[repIdx];
+                if (id === undefined) { survivors.push(handle); return; }
+                const neighbors = ha.adjacency.adj[id];
+                if (!neighbors.length) return;
+                let allInside = true;
+                for (let i = 0; i < neighbors.length; i++) {
+                    const nb = ha.handleById.get(neighbors[i]);
+                    if (nb && !selectedSet.has(nb)) { allInside = false; break; }
+                }
+                if (allInside) survivors.push(handle);
+            });
+            const primary = survivors.includes(selectedVertexHandle) ? selectedVertexHandle : survivors[survivors.length - 1] || null;
+            applyVertexSelection(survivors, primary);
+            setStatus(`Shrink • ${survivors.length} selected`);
+        }
+
+
+        let _boxSelectOverlayEl = null;
+        function ensureBoxSelectOverlay() {
+            if (_boxSelectOverlayEl) return _boxSelectOverlayEl;
+            const el = document.createElement("div");
+            el.id = "boxSelectOverlay";
+            el.style.cssText = "position:fixed; pointer-events:none; border:1px dashed #f0d376; background:rgba(240,211,118,0.12); z-index:400; display:none;";
+            document.body.appendChild(el);
+            _boxSelectOverlayEl = el;
+            return el;
+        }
+
+
+        function showBoxSelectOverlay() {
+            const el = ensureBoxSelectOverlay();
+            const a = boxSelectState.dragStart;
+            const b = boxSelectState.dragCurrent || a;
+            if (!a) return;
+            el.style.left = `${Math.min(a.x, b.x)}px`;
+            el.style.top = `${Math.min(a.y, b.y)}px`;
+            el.style.width = `${Math.abs(b.x - a.x)}px`;
+            el.style.height = `${Math.abs(b.y - a.y)}px`;
+            el.style.display = "block";
+        }
+
+
+        function hideBoxSelectOverlay() {
+            if (_boxSelectOverlayEl) _boxSelectOverlayEl.style.display = "none";
+        }
+
+
+        function armBoxSelect() {
+            if (editMode !== "vertex") {
+                setStatus("Box select needs vertex mode");
+                return;
+            }
+            boxSelectState.armed = !boxSelectState.armed;
+            renderer.domElement.style.cursor = boxSelectState.armed ? "crosshair" : "";
+            setStatus(boxSelectState.armed ? "Box select armed • drag a rectangle" : "Box select cancelled");
+            updateUI();
+        }
+
+
+        function startBoxSelectDrag(clientX, clientY) {
+            boxSelectState.dragStart = { x: clientX, y: clientY };
+            boxSelectState.dragCurrent = { x: clientX, y: clientY };
+            orbit.enabled = false;
+            showBoxSelectOverlay();
+        }
+
+
+        function updateBoxSelectDrag(clientX, clientY) {
+            if (!boxSelectState.dragStart) return;
+            boxSelectState.dragCurrent = { x: clientX, y: clientY };
+            showBoxSelectOverlay();
+        }
+
+
+        function endBoxSelectDrag() {
+            const a = boxSelectState.dragStart;
+            const b = boxSelectState.dragCurrent;
+            boxSelectState.dragStart = null;
+            boxSelectState.dragCurrent = null;
+            boxSelectState.armed = false;
+            renderer.domElement.style.cursor = "";
+            orbit.enabled = true;
+            hideBoxSelectOverlay();
+
+            if (!a || !b || editMode !== "vertex") { updateUI(); return; }
+            const x1 = Math.min(a.x, b.x), x2 = Math.max(a.x, b.x);
+            const y1 = Math.min(a.y, b.y), y2 = Math.max(a.y, b.y);
+            if (x2 - x1 < 4 && y2 - y1 < 4) { updateUI(); return; }
+
+            const inside = [];
+            const tmp = new THREE.Vector3();
+            vertexGroup.children.forEach((handle) => {
+                tmp.copy(handle.position).project(camera);
+                if (tmp.z < -1 || tmp.z > 1) return;
+                const sx = (tmp.x + 1) * 0.5 * window.innerWidth;
+                const sy = (1 - tmp.y) * 0.5 * window.innerHeight;
+                if (sx >= x1 && sx <= x2 && sy >= y1 && sy <= y2) inside.push(handle);
+            });
+
+            const merged = multiSelectMode
+                ? Array.from(new Set([...selectedVertexHandles, ...inside]))
+                : inside;
+            applyVertexSelection(merged, merged[merged.length - 1] || null);
+            setStatus(`Box selected ${inside.length}${multiSelectMode ? " (added)" : ""}`);
+            updateUI();
+        }
+
+
+        function cancelBoxSelect() {
+            boxSelectState.armed = false;
+            boxSelectState.dragStart = null;
+            boxSelectState.dragCurrent = null;
+            renderer.domElement.style.cursor = "";
+            orbit.enabled = true;
+            hideBoxSelectOverlay();
+            updateUI();
         }
 
 
@@ -3648,7 +3979,8 @@
                         .map((handle) => ({
                             handle,
                             position: handle.position.clone()
-                        }))
+                        })),
+                    softStates: captureSoftSelectionStates()
                 };
                 return;
             }
@@ -3771,7 +4103,9 @@
             if (!isRestoringHistory) {
                 if (editMode === "vertex" && selectedVertexHandle) {
                     applySelectedVertexHandleDelta();
+                    applySoftSelectionDelta();
                     applySelectedVertexHandlesToGeometry();
+                    applySoftAffectedHandlesToGeometry();
                 }
                 const endSnapshot = createHistorySnapshot();
                 if (dragHistoryStart !== endSnapshot) {
@@ -3794,10 +4128,12 @@
             if (editMode === "vertex" && selectedVertexHandle) {
                 enforceAxisLockOnVertexHandle(selectedVertexHandle);
                 applySelectedVertexHandleDelta();
+                applySoftSelectionDelta();
                 selectedVertexHandles.forEach((handle) => {
                     if (handle !== selectedVertexHandle) enforceAxisLockOnVertexHandle(handle);
                 });
                 applySelectedVertexHandlesToGeometry();
+                applySoftAffectedHandlesToGeometry();
             } else if (selectedObject) {
                 enforceAxisLockOnObject(selectedObject);
                 applyMultiSelectionTransformDelta();
@@ -4757,17 +5093,38 @@
                     ]
                 ]
             },
-            edit: {
-                label: "Edit",
+            vertex: {
+                label: "Vertex",
                 groups: [
                     [
                         { action: "vertexMode", icon: "◉", label: "Vertex", active: () => editMode === "vertex" },
-                        { action: "moveMode", icon: "✥", label: "Move", active: () => editMode === "vertex" || transformMode === "translate" },
+                        { action: "objectMode", icon: "□", label: "Object" },
+                        { action: "moveMode", icon: "✥", label: "Move", active: () => transformMode === "translate" },
                         { action: "focusSelection", icon: "◎", label: "Focus" }
                     ],
                     [
-                        { action: "objectMode", icon: "□", label: "Object" },
-                        { action: "toggleSnap", icon: "⌁", label: snapEnabled ? "Snap On" : "Snap Off", active: () => snapEnabled },
+                        { action: "selectAllVerts", icon: "▦", label: "All" },
+                        { action: "invertVertSel", icon: "⇅", label: "Invert" },
+                        { action: "growVertSel", icon: "⊕", label: "Grow" },
+                        { action: "shrinkVertSel", icon: "⊖", label: "Shrink" },
+                        { action: "armBoxSelect", icon: "▢", label: () => boxSelectState.armed ? "Box (drag)" : "Box", active: () => boxSelectState.armed },
+                        { action: "vertexClearSelection", icon: "✕", label: "Clear" }
+                    ],
+                    [
+                        { action: "toggleSoftSelect", icon: "◌", label: () => softSelectState.enabled ? "Soft On" : "Soft Off", active: () => softSelectState.enabled },
+                        { action: "softRadiusDown", icon: "－", label: "R-" },
+                        { action: "softRadiusReadout", icon: "○", label: () => `Soft ${softSelectState.radius.toFixed(2)}` },
+                        { action: "softRadiusUp", icon: "＋", label: "R+" },
+                        { action: "softFalloffCycle", icon: "↬", label: () => `Curve · ${softSelectState.falloff}` }
+                    ],
+                    [
+                        { action: "vertexMultiSelect", icon: "⊞", label: "Multi", active: () => multiSelectMode },
+                        { action: "vertexInsert", icon: "▣", label: "Insert" },
+                        { action: "vertexWeld", icon: "⋈", label: "Weld" },
+                        { action: "vertexRelax", icon: "≈", label: "Relax" }
+                    ],
+                    [
+                        { action: "toggleSnap", icon: "⌁", label: () => snapEnabled ? "Snap On" : "Snap Off", active: () => snapEnabled },
                         { action: "axisFree", icon: "⟡", label: "Free", active: () => axisLock === null },
                         { action: "axisX", icon: "X", label: "X", active: () => axisLock === "x" },
                         { action: "axisY", icon: "Y", label: "Y", active: () => axisLock === "y" },
@@ -5012,18 +5369,11 @@
             setStatus("Select a quad face first, then use Insert");
         }
         function setDockMode(mode) {
+            // Legacy alias: "edit" used to mean the vertex/face combo dock
+            if (mode === "edit") mode = "vertex";
             if (!dockModeDefinitions[mode]) return;
+            if (boxSelectState.armed && mode !== "vertex") cancelBoxSelect();
             uiDockMode = mode;
-            if (mode === "edit") {
-                if (editMode === "face") {
-                    setEditMode("face");
-                } else {
-                    setEditMode("vertex");
-                }
-                renderContextDock();
-                updateUI();
-                return;
-            }
             if (mode === "vertex") {
                 setEditMode("vertex");
                 renderContextDock();
@@ -7194,7 +7544,8 @@
                 clearSelectedFace();
                 transform.detach();
                 buildVertexHandles(selectedObject);
-                setStatus("Tap a vertex handle");
+                if (uiDockMode !== "vertex") uiDockMode = "vertex";
+                setStatus("Tap a vertex handle • drag to move • Box / Soft / Grow available in dock");
             } else if (mode === "face") {
                 clearVertexHandles();
                 transform.detach();
@@ -9291,7 +9642,17 @@
 
 
                 case "objectMode": setEditMode("object"); break;
-                case "vertexMode": setDockMode("edit"); setEditMode("vertex"); break;
+                case "vertexMode": setDockMode("vertex"); setEditMode("vertex"); break;
+                case "selectAllVerts": selectAllVertexHandles(); break;
+                case "invertVertSel": invertVertexSelection(); break;
+                case "growVertSel": growVertexSelection(); break;
+                case "shrinkVertSel": shrinkVertexSelection(); break;
+                case "armBoxSelect": armBoxSelect(); break;
+                case "toggleSoftSelect": toggleSoftSelect(); break;
+                case "softRadiusDown": adjustSoftSelectRadius(-0.05); break;
+                case "softRadiusUp": adjustSoftSelectRadius(0.05); break;
+                case "softRadiusReadout": break;
+                case "softFalloffCycle": cycleSoftSelectFalloff(); break;
                 case "sculptBrushGrab": setSculptBrush("grab"); break;
                 case "sculptBrushSmooth": setSculptBrush("smooth"); break;
                 case "sculptBrushInflate": setSculptBrush("inflate"); break;
@@ -9750,6 +10111,10 @@
                 y: e.clientY,
                 time: performance.now()
             };
+            if (boxSelectState.armed && editMode === "vertex" && (e.button === 0 || e.button === undefined)) {
+                startBoxSelectDrag(e.clientX, e.clientY);
+                return;
+            }
             if (editMode === "sculpt" && (e.button === 0 || e.button === undefined)) {
                 startSculptStroke(e.clientX, e.clientY);
             }
@@ -9757,6 +10122,11 @@
 
 
         renderer.domElement.addEventListener("pointerup", (e) => {
+            if (boxSelectState.dragStart) {
+                endBoxSelectDrag();
+                pointerTapState = null;
+                return;
+            }
             if (editMode === "sculpt" && sculptState.stroke) {
                 endSculptStroke();
                 pointerTapState = null;
@@ -9804,6 +10174,10 @@
 
 
         renderer.domElement.addEventListener("pointermove", (e) => {
+            if (boxSelectState.dragStart) {
+                updateBoxSelectDrag(e.clientX, e.clientY);
+                return;
+            }
             if (editMode === "sculpt") {
                 if (sculptState.stroke) {
                     updateSculptStroke(e.clientX, e.clientY);
@@ -9819,6 +10193,7 @@
 
 
         renderer.domElement.addEventListener("pointerleave", () => {
+            if (boxSelectState.dragStart) cancelBoxSelect();
             if (editMode === "sculpt") {
                 if (sculptState.stroke) endSculptStroke();
                 hideSculptBrushIndicator();
@@ -9832,8 +10207,19 @@
 
 
         renderer.domElement.addEventListener("pointercancel", () => {
+            if (boxSelectState.dragStart) cancelBoxSelect();
             if (editMode === "sculpt" && sculptState.stroke) endSculptStroke();
             pointerTapState = null;
+        });
+
+
+        window.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                if (boxSelectState.armed || boxSelectState.dragStart) {
+                    cancelBoxSelect();
+                    e.preventDefault();
+                }
+            }
         });
 
 
