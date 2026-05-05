@@ -5363,6 +5363,56 @@
         };
 
 
+        const insertPreviewIndicator = new THREE.Mesh(
+            new THREE.SphereGeometry(0.05, 18, 18),
+            new THREE.MeshBasicMaterial({
+                color: 0x9bd5ff,
+                transparent: true,
+                opacity: 0.85,
+                depthTest: false,
+                toneMapped: false
+            })
+        );
+        insertPreviewIndicator.renderOrder = 1000;
+        insertPreviewIndicator.visible = false;
+        insertPreviewIndicator.raycast = () => null;
+        scene.add(insertPreviewIndicator);
+
+
+        function hideInsertPreview() {
+            insertPreviewIndicator.visible = false;
+        }
+
+
+        function updateInsertPreview(clientX, clientY) {
+            if (!pendingFacePickState.armed || pendingFacePickState.purpose !== "vertexInsert") {
+                hideInsertPreview();
+                return;
+            }
+            const mesh = selectedObject;
+            if (!isRenderable(mesh)) {
+                hideInsertPreview();
+                return;
+            }
+            pointer.x = (clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObject(mesh, false);
+            if (!hits.length) {
+                hideInsertPreview();
+                return;
+            }
+            insertPreviewIndicator.position.copy(hits[0].point);
+            // Match indicator scale to vertex handle size
+            mesh.geometry.computeBoundingBox?.();
+            const box = mesh.geometry.boundingBox;
+            const size = box ? box.getSize(new THREE.Vector3()).length() : 1;
+            const r = Math.max(0.035, size * 0.018);
+            insertPreviewIndicator.scale.setScalar(r / 0.05);
+            insertPreviewIndicator.visible = true;
+        }
+
+
         function armVertexInsertPick() {
             if (editMode !== "vertex" || !isRenderable(selectedObject)) {
                 setStatus("Vertex mode and a mesh selection needed");
@@ -5371,7 +5421,7 @@
             pendingFacePickState.armed = true;
             pendingFacePickState.purpose = "vertexInsert";
             renderer.domElement.style.cursor = "crosshair";
-            setStatus("Tap anywhere on the mesh to drop a new vertex (Esc to cancel)");
+            setStatus("Tap mesh to drop a vertex • repeat to add more • tap Insert again or Esc to stop");
             updateUI();
         }
 
@@ -5381,7 +5431,8 @@
             pendingFacePickState.armed = false;
             pendingFacePickState.purpose = null;
             renderer.domElement.style.cursor = "";
-            setStatus("Insert cancelled");
+            hideInsertPreview();
+            setStatus("Insert off");
             updateUI();
         }
 
@@ -5496,9 +5547,11 @@
             );
             if (closest) selectVertexHandle(closest);
 
-            cancelFacePick();
+            // Sticky: keep insert armed so the user can drop more verts in a row.
+            // They explicitly toggle it off via Insert button, Esc, or dock switch.
             recordHistory();
-            setStatus("Vertex inserted");
+            const total = mesh.geometry.attributes.position.count;
+            setStatus(`Vertex inserted • ${total} verts • tap to add more`);
             return true;
         }
 
@@ -10284,12 +10337,21 @@
             if (pendingFacePickState.armed && pointerTapState) {
                 const ddx = e.clientX - pointerTapState.x;
                 const ddy = e.clientY - pointerTapState.y;
-                if (Math.hypot(ddx, ddy) < 10) {
-                    if (pendingFacePickState.purpose === "vertexInsert") {
-                        performVertexInsertAt(e.clientX, e.clientY);
+                if (!suppressNextPick && Math.hypot(ddx, ddy) < 10) {
+                    // If a vertex handle was tapped, fall through to normal
+                    // selection so the gizmo attaches to it - otherwise sticky
+                    // Insert would steal every click.
+                    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+                    pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                    raycaster.setFromCamera(pointer, camera);
+                    const handleHits = raycaster.intersectObjects(vertexGroup.children, false);
+                    if (!handleHits.length) {
+                        if (pendingFacePickState.purpose === "vertexInsert") {
+                            performVertexInsertAt(e.clientX, e.clientY);
+                        }
+                        pointerTapState = null;
+                        return;
                     }
-                    pointerTapState = null;
-                    return;
                 }
             }
             if (!pointerTapState) return;
@@ -10338,6 +10400,24 @@
                 updateBoxSelectDrag(e.clientX, e.clientY);
                 return;
             }
+            if (pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert") {
+                if (suppressNextPick || e.buttons !== 0) {
+                    hideInsertPreview();
+                } else {
+                    // Hide the ghost when hovering an existing handle so it's
+                    // visually clear the next tap will pick the handle, not insert
+                    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+                    pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                    raycaster.setFromCamera(pointer, camera);
+                    const handleHits = raycaster.intersectObjects(vertexGroup.children, false);
+                    if (handleHits.length) {
+                        hideInsertPreview();
+                    } else {
+                        updateInsertPreview(e.clientX, e.clientY);
+                    }
+                }
+                return;
+            }
             if (editMode === "sculpt") {
                 if (sculptState.stroke) {
                     updateSculptStroke(e.clientX, e.clientY);
@@ -10358,6 +10438,7 @@
                 if (sculptState.stroke) endSculptStroke();
                 hideSculptBrushIndicator();
             }
+            hideInsertPreview();
             pointerTapState = null;
             if (faceCutHover) {
                 faceCutHover = null;
