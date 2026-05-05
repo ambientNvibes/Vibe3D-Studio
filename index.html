@@ -5126,7 +5126,7 @@
                     ],
                     [
                         { action: "vertexMultiSelect", icon: "⊞", label: "Multi", active: () => multiSelectMode },
-                        { action: "vertexInsert", icon: "▣", label: "Insert" },
+                        { action: "vertexInsert", icon: "▣", label: () => pendingFacePickState.armed && pendingFacePickState.purpose === "insert" ? "Tap face" : "Insert", active: () => pendingFacePickState.armed && pendingFacePickState.purpose === "insert" },
                         { action: "vertexWeld", icon: "⋈", label: "Weld" },
                         { action: "vertexRelax", icon: "≈", label: "Relax" }
                     ],
@@ -5357,29 +5357,94 @@
         }
 
 
-        function vertexInsertSelected() {
-            if (selectedFaceData && selectedObject && isRenderable(selectedObject) && Array.isArray(selectedFaceData.quadVertices) && selectedFaceData.quadVertices.length === 4) {
-                insetSelectedFaceShell(0.18);
-                setEditMode("vertex");
-                const mesh = selectedObject;
-                if (mesh?.geometry?.attributes?.position) {
-                    buildVertexHandles(mesh);
-                    const center = new THREE.Vector3();
-                    selectedFaceData.quadVertices.forEach((v) => center.add(new THREE.Vector3().fromArray(v)));
-                    center.multiplyScalar(0.25);
-                    const closest = [...vertexGroup.children].reduce((best, h) => (best && best.position.distanceTo(center) < h.position.distanceTo(center)) ? best : h, null);
-                    if (closest) selectVertexHandle(closest);
-                }
-                setStatus("Vertex insert created a new inner quad");
+        const pendingFacePickState = {
+            armed: false,
+            purpose: null
+        };
+
+
+        function armFacePickForInsert() {
+            if (editMode !== "vertex" || !isRenderable(selectedObject)) {
+                setStatus("Vertex mode and a mesh selection needed");
                 return;
             }
-            setStatus("Insert needs a quad face — pick one in Face mode first, then return here");
+            pendingFacePickState.armed = true;
+            pendingFacePickState.purpose = "insert";
+            renderer.domElement.style.cursor = "crosshair";
+            setStatus("Tap a quad face on the mesh to insert (Esc to cancel)");
+            updateUI();
         }
+
+
+        function cancelFacePick() {
+            if (!pendingFacePickState.armed) return;
+            pendingFacePickState.armed = false;
+            pendingFacePickState.purpose = null;
+            renderer.domElement.style.cursor = "";
+            setStatus("Face pick cancelled");
+            updateUI();
+        }
+
+
+        function performInsertOnFaceFromHit(clientX, clientY) {
+            const mesh = selectedObject;
+            if (!isRenderable(mesh)) return false;
+            pointer.x = (clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            const hits = raycaster.intersectObject(mesh, false);
+            if (!hits.length) {
+                setStatus("Tap a face on the selected mesh");
+                return false;
+            }
+            const hit = hits[0];
+            if (!hit.face) {
+                setStatus("Couldn't read that face — try another");
+                return false;
+            }
+            const face = buildCoplanarFaceSelection(mesh, hit.faceIndex != null ? hit.faceIndex : 0);
+            if (!face || !Array.isArray(face.quadVertices) || face.quadVertices.length !== 4) {
+                setStatus("That region isn't a quad — Insert needs a quad face");
+                return false;
+            }
+            selectedFaceData = face;
+            insetSelectedFaceShell(0.18);
+            if (mesh.geometry && mesh.geometry.attributes && mesh.geometry.attributes.position) {
+                buildVertexHandles(mesh);
+                const center = new THREE.Vector3();
+                face.quadVertices.forEach((v) => center.add(new THREE.Vector3().fromArray(v)));
+                center.multiplyScalar(0.25);
+                const closest = [...vertexGroup.children].reduce(
+                    (best, h) => (best && best.position.distanceTo(center) < h.position.distanceTo(center)) ? best : h,
+                    null
+                );
+                if (closest) selectVertexHandle(closest);
+            }
+            cancelFacePick();
+            setStatus("Inserted inner quad");
+            return true;
+        }
+
+
+        function vertexInsertSelected() {
+            if (pendingFacePickState.armed && pendingFacePickState.purpose === "insert") {
+                cancelFacePick();
+                return;
+            }
+            if (editMode !== "vertex" || !isRenderable(selectedObject)) {
+                setStatus("Vertex mode and a mesh selection needed");
+                return;
+            }
+            armFacePickForInsert();
+        }
+
+
         function setDockMode(mode) {
             // Legacy alias: "edit" used to mean the vertex/face combo dock
             if (mode === "edit") mode = "vertex";
             if (!dockModeDefinitions[mode]) return;
             if (boxSelectState.armed && mode !== "vertex") cancelBoxSelect();
+            if (pendingFacePickState.armed && mode !== "vertex") cancelFacePick();
             uiDockMode = mode;
             if (mode === "vertex") {
                 setEditMode("vertex");
@@ -10139,6 +10204,15 @@
                 pointerTapState = null;
                 return;
             }
+            if (pendingFacePickState.armed && pointerTapState) {
+                const ddx = e.clientX - pointerTapState.x;
+                const ddy = e.clientY - pointerTapState.y;
+                if (Math.hypot(ddx, ddy) < 10) {
+                    performInsertOnFaceFromHit(e.clientX, e.clientY);
+                    pointerTapState = null;
+                    return;
+                }
+            }
             if (!pointerTapState) return;
 
 
@@ -10224,6 +10298,11 @@
             if (e.key === "Escape") {
                 if (boxSelectState.armed || boxSelectState.dragStart) {
                     cancelBoxSelect();
+                    e.preventDefault();
+                    return;
+                }
+                if (pendingFacePickState.armed) {
+                    cancelFacePick();
                     e.preventDefault();
                 }
             }
