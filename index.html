@@ -5126,7 +5126,7 @@
                     ],
                     [
                         { action: "vertexMultiSelect", icon: "⊞", label: "Multi", active: () => multiSelectMode },
-                        { action: "vertexInsert", icon: "▣", label: () => pendingFacePickState.armed && pendingFacePickState.purpose === "insert" ? "Tap face" : "Insert", active: () => pendingFacePickState.armed && pendingFacePickState.purpose === "insert" },
+                        { action: "vertexInsert", icon: "▣", label: () => pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert" ? "Tap mesh" : "Insert", active: () => pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert" },
                         { action: "vertexWeld", icon: "⋈", label: "Weld" },
                         { action: "vertexRelax", icon: "≈", label: "Relax" }
                     ],
@@ -5363,15 +5363,15 @@
         };
 
 
-        function armFacePickForInsert() {
+        function armVertexInsertPick() {
             if (editMode !== "vertex" || !isRenderable(selectedObject)) {
                 setStatus("Vertex mode and a mesh selection needed");
                 return;
             }
             pendingFacePickState.armed = true;
-            pendingFacePickState.purpose = "insert";
+            pendingFacePickState.purpose = "vertexInsert";
             renderer.domElement.style.cursor = "crosshair";
-            setStatus("Tap a quad face on the mesh to insert (Esc to cancel)");
+            setStatus("Tap anywhere on the mesh to drop a new vertex (Esc to cancel)");
             updateUI();
         }
 
@@ -5381,12 +5381,91 @@
             pendingFacePickState.armed = false;
             pendingFacePickState.purpose = null;
             renderer.domElement.style.cursor = "";
-            setStatus("Face pick cancelled");
+            setStatus("Insert cancelled");
             updateUI();
         }
 
 
-        function performInsertOnFaceFromHit(clientX, clientY) {
+        function insertVertexInTriangle(mesh, faceIndex, localPosition) {
+            const geom = mesh.geometry;
+            const pos = geom.attributes.position;
+            const oldCount = pos.count;
+            const oldArr = pos.array;
+
+            if (geom.index) {
+                const idx = geom.index.array;
+                const t = faceIndex * 3;
+                const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+
+                const newPositions = new Float32Array((oldCount + 1) * 3);
+                newPositions.set(oldArr);
+                newPositions[oldCount * 3]     = localPosition.x;
+                newPositions[oldCount * 3 + 1] = localPosition.y;
+                newPositions[oldCount * 3 + 2] = localPosition.z;
+
+                const oldIdxLen = idx.length;
+                const useUint32 = (oldCount + 1) > 65535;
+                const Ctor = useUint32 ? Uint32Array : Uint16Array;
+                const newIdx = new Ctor(oldIdxLen + 6);
+                for (let i = 0; i < t; i++) newIdx[i] = idx[i];
+                newIdx[t]     = a;
+                newIdx[t + 1] = b;
+                newIdx[t + 2] = oldCount;
+                for (let i = t + 3; i < oldIdxLen; i++) newIdx[i] = idx[i];
+                newIdx[oldIdxLen]     = b;
+                newIdx[oldIdxLen + 1] = c;
+                newIdx[oldIdxLen + 2] = oldCount;
+                newIdx[oldIdxLen + 3] = c;
+                newIdx[oldIdxLen + 4] = a;
+                newIdx[oldIdxLen + 5] = oldCount;
+
+                geom.setAttribute("position", new THREE.Float32BufferAttribute(newPositions, 3));
+                geom.setIndex(new THREE.BufferAttribute(newIdx, 1));
+            } else {
+                const t = faceIndex * 9;
+                const ax = oldArr[t],     ay = oldArr[t + 1], az = oldArr[t + 2];
+                const bx = oldArr[t + 3], by = oldArr[t + 4], bz = oldArr[t + 5];
+                const cx = oldArr[t + 6], cy = oldArr[t + 7], cz = oldArr[t + 8];
+                const nx = localPosition.x, ny = localPosition.y, nz = localPosition.z;
+
+                const newPositions = new Float32Array(oldArr.length + 18);
+                newPositions.set(oldArr);
+                newPositions[t]     = ax; newPositions[t + 1] = ay; newPositions[t + 2] = az;
+                newPositions[t + 3] = bx; newPositions[t + 4] = by; newPositions[t + 5] = bz;
+                newPositions[t + 6] = nx; newPositions[t + 7] = ny; newPositions[t + 8] = nz;
+                const e = oldArr.length;
+                newPositions[e]      = bx; newPositions[e + 1]  = by; newPositions[e + 2]  = bz;
+                newPositions[e + 3]  = cx; newPositions[e + 4]  = cy; newPositions[e + 5]  = cz;
+                newPositions[e + 6]  = nx; newPositions[e + 7]  = ny; newPositions[e + 8]  = nz;
+                newPositions[e + 9]  = cx; newPositions[e + 10] = cy; newPositions[e + 11] = cz;
+                newPositions[e + 12] = ax; newPositions[e + 13] = ay; newPositions[e + 14] = az;
+                newPositions[e + 15] = nx; newPositions[e + 16] = ny; newPositions[e + 17] = nz;
+
+                geom.setAttribute("position", new THREE.Float32BufferAttribute(newPositions, 3));
+            }
+
+            geom.computeVertexNormals();
+            geom.computeBoundingBox();
+            geom.computeBoundingSphere();
+            if (geom.userData) {
+                geom.userData.outlineNormalVersion = null;
+                geom.userData.sharedTopologyPrimitive = null;
+                geom.userData.sharedQuadFaces = null;
+                geom.userData.sharedVertices = null;
+                geom.userData.triangleToQuad = null;
+            }
+            if (typeof sculptAdjacencyCache !== "undefined" && sculptAdjacencyCache.delete) {
+                sculptAdjacencyCache.delete(geom);
+            }
+            // Topology changed — retype primitive so undo/serialization uses the
+            // generic position-array path instead of shared-quad reconstruction
+            if (mesh.userData && (mesh.userData.type === "cube" || mesh.userData.type === "plane")) {
+                mesh.userData.type = "mesh";
+            }
+        }
+
+
+        function performVertexInsertAt(clientX, clientY) {
             const mesh = selectedObject;
             if (!isRenderable(mesh)) return false;
             pointer.x = (clientX / window.innerWidth) * 2 - 1;
@@ -5394,40 +5473,38 @@
             raycaster.setFromCamera(pointer, camera);
             const hits = raycaster.intersectObject(mesh, false);
             if (!hits.length) {
-                setStatus("Tap a face on the selected mesh");
+                setStatus("Tap on the selected mesh");
                 return false;
             }
             const hit = hits[0];
-            if (!hit.face) {
-                setStatus("Couldn't read that face — try another");
+            if (hit.faceIndex == null) {
+                setStatus("Couldn't read that face — try another spot");
                 return false;
             }
-            const face = buildCoplanarFaceSelection(mesh, hit.faceIndex != null ? hit.faceIndex : 0);
-            if (!face || !Array.isArray(face.quadVertices) || face.quadVertices.length !== 4) {
-                setStatus("That region isn't a quad — Insert needs a quad face");
-                return false;
-            }
-            selectedFaceData = face;
-            insetSelectedFaceShell(0.18);
-            if (mesh.geometry && mesh.geometry.attributes && mesh.geometry.attributes.position) {
-                buildVertexHandles(mesh);
-                const center = new THREE.Vector3();
-                face.quadVertices.forEach((v) => center.add(new THREE.Vector3().fromArray(v)));
-                center.multiplyScalar(0.25);
-                const closest = [...vertexGroup.children].reduce(
-                    (best, h) => (best && best.position.distanceTo(center) < h.position.distanceTo(center)) ? best : h,
-                    null
-                );
-                if (closest) selectVertexHandle(closest);
-            }
+
+            mesh.updateMatrixWorld();
+            const localHit = mesh.worldToLocal(hit.point.clone());
+
+            insertVertexInTriangle(mesh, hit.faceIndex, localHit);
+            ensureOutlineForMesh(mesh);
+
+            buildVertexHandles(mesh);
+            const targetWorld = mesh.localToWorld(localHit.clone());
+            const closest = vertexGroup.children.reduce(
+                (best, h) => (best && best.position.distanceTo(targetWorld) < h.position.distanceTo(targetWorld)) ? best : h,
+                null
+            );
+            if (closest) selectVertexHandle(closest);
+
             cancelFacePick();
-            setStatus("Inserted inner quad");
+            recordHistory();
+            setStatus("Vertex inserted");
             return true;
         }
 
 
         function vertexInsertSelected() {
-            if (pendingFacePickState.armed && pendingFacePickState.purpose === "insert") {
+            if (pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert") {
                 cancelFacePick();
                 return;
             }
@@ -5435,7 +5512,7 @@
                 setStatus("Vertex mode and a mesh selection needed");
                 return;
             }
-            armFacePickForInsert();
+            armVertexInsertPick();
         }
 
 
@@ -10208,7 +10285,9 @@
                 const ddx = e.clientX - pointerTapState.x;
                 const ddy = e.clientY - pointerTapState.y;
                 if (Math.hypot(ddx, ddy) < 10) {
-                    performInsertOnFaceFromHit(e.clientX, e.clientY);
+                    if (pendingFacePickState.purpose === "vertexInsert") {
+                        performVertexInsertAt(e.clientX, e.clientY);
+                    }
                     pointerTapState = null;
                     return;
                 }
