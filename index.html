@@ -5421,6 +5421,7 @@
             pendingFacePickState.armed = true;
             pendingFacePickState.purpose = "vertexInsert";
             renderer.domElement.style.cursor = "crosshair";
+            orbit.enabled = false;
             setStatus("Tap mesh to drop a vertex • repeat to add more • tap Insert again or Esc to stop");
             updateUI();
         }
@@ -5431,6 +5432,7 @@
             pendingFacePickState.armed = false;
             pendingFacePickState.purpose = null;
             renderer.domElement.style.cursor = "";
+            orbit.enabled = true;
             hideInsertPreview();
             setStatus("Insert off");
             updateUI();
@@ -7470,6 +7472,13 @@
         function refreshSelectionVisuals() {
             clearSelectionOverlays();
 
+            // While Insert is armed, the bright gold edge overlay (depthTest: false,
+            // renderOrder 999) overpowers the mesh's actual faces and reads as
+            // see-through cube. Suppress it - vertex handles + gizmo + cyan ghost
+            // already make selection obvious.
+            if (pendingFacePickState && pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert") {
+                return;
+            }
 
             selectedObjects.forEach((node) => {
                 const helperColor = 0xf0d376;
