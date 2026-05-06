@@ -5418,6 +5418,14 @@
                 setStatus("Vertex mode and a mesh selection needed");
                 return;
             }
+            // If the camera is inside the selection's bounding box, the
+            // FrontSide-culled mesh renders as see-through (PBR) or shows
+            // only the dark BackSide outline (toon). Pull back so the
+            // surface the user is trying to tap is actually visible.
+            const _focusBox = new THREE.Box3().setFromObject(selectedObject);
+            if (!_focusBox.isEmpty() && _focusBox.containsPoint(camera.position)) {
+                focusSelection();
+            }
             pendingFacePickState.armed = true;
             pendingFacePickState.purpose = "vertexInsert";
             renderer.domElement.style.cursor = "crosshair";
