@@ -5448,123 +5448,93 @@
 
 
         function insertVertexInTriangle(mesh, faceIndex, localPosition) {
-            const geom = mesh.geometry;
-            const pos = geom.attributes.position;
-            const oldCount = pos.count;
-            const oldArr = pos.array;
+            const oldGeom = mesh.geometry;
+            const oldPos = oldGeom.attributes.position;
+            const oldCount = oldPos.count;
 
-            if (geom.index) {
-                const idx = geom.index.array;
+            // Build a fresh BufferGeometry from scratch each insert. We only
+            // carry over position + index and let computeVertexNormals
+            // regenerate normals. This deliberately drops uv / color /
+            // tangent / outlineNormal / per-face groups - every previous
+            // attempt to extend them in-place left subtle count mismatches
+            // that surfaced as zero normals (black shading) or whole-mesh
+            // culling once the bounding sphere or shader bind failed.
+            const newGeom = new THREE.BufferGeometry();
+            let newPositions, newIndex;
+
+            if (oldGeom.index) {
+                const idx = oldGeom.index.array;
                 const t = faceIndex * 3;
                 const a = idx[t], b = idx[t + 1], c = idx[t + 2];
 
-                // Barycentric weights for the new vertex M relative to the
-                // original triangle (a, b, c). Used to interpolate every
-                // per-vertex attribute (uv, color, normal, tangent, ...) so
-                // the new vertex blends in continuously rather than getting
-                // zero/garbage values from a buffer that's now too short.
-                const va = new THREE.Vector3(oldArr[a*3], oldArr[a*3+1], oldArr[a*3+2]);
-                const vb = new THREE.Vector3(oldArr[b*3], oldArr[b*3+1], oldArr[b*3+2]);
-                const vc = new THREE.Vector3(oldArr[c*3], oldArr[c*3+1], oldArr[c*3+2]);
-                const v0 = vb.clone().sub(va);
-                const v1 = vc.clone().sub(va);
-                const v2 = localPosition.clone().sub(va);
-                const d00 = v0.dot(v0), d01 = v0.dot(v1), d11 = v1.dot(v1);
-                const d20 = v2.dot(v0), d21 = v2.dot(v1);
-                const denom = d00 * d11 - d01 * d01;
-                let wb = 0, wc = 0;
-                if (Math.abs(denom) > 1e-12) {
-                    wb = (d11 * d20 - d01 * d21) / denom;
-                    wc = (d00 * d21 - d01 * d20) / denom;
-                }
-                const wa = 1 - wb - wc;
-
-                // Grow every attribute by one vertex. Position uses the exact
-                // raycast point; everything else is barycentric-interpolated
-                // from a, b, c.
-                const attrNames = Object.keys(geom.attributes);
-                for (const name of attrNames) {
-                    const old = geom.attributes[name];
-                    const itemSize = old.itemSize;
-                    const ArrCtor = old.array.constructor;
-                    const newArr = new ArrCtor((oldCount + 1) * itemSize);
-                    newArr.set(old.array);
-                    if (name === "position") {
-                        newArr[oldCount * 3]     = localPosition.x;
-                        newArr[oldCount * 3 + 1] = localPosition.y;
-                        newArr[oldCount * 3 + 2] = localPosition.z;
-                    } else {
-                        for (let k = 0; k < itemSize; k++) {
-                            newArr[oldCount * itemSize + k] =
-                                wa * old.array[a * itemSize + k] +
-                                wb * old.array[b * itemSize + k] +
-                                wc * old.array[c * itemSize + k];
-                        }
-                    }
-                    geom.setAttribute(name, new THREE.BufferAttribute(newArr, itemSize, old.normalized));
-                }
+                newPositions = new Float32Array((oldCount + 1) * 3);
+                // subarray() guards against any stale extra floats past
+                // oldCount * 3 in the source buffer.
+                newPositions.set(oldPos.array.subarray(0, oldCount * 3));
+                newPositions[oldCount * 3]     = localPosition.x;
+                newPositions[oldCount * 3 + 1] = localPosition.y;
+                newPositions[oldCount * 3 + 2] = localPosition.z;
 
                 const oldIdxLen = idx.length;
                 const useUint32 = (oldCount + 1) > 65535;
                 const Ctor = useUint32 ? Uint32Array : Uint16Array;
-                const newIdx = new Ctor(oldIdxLen + 6);
-                for (let i = 0; i < t; i++) newIdx[i] = idx[i];
-                newIdx[t]     = a;
-                newIdx[t + 1] = b;
-                newIdx[t + 2] = oldCount;
-                for (let i = t + 3; i < oldIdxLen; i++) newIdx[i] = idx[i];
-                newIdx[oldIdxLen]     = b;
-                newIdx[oldIdxLen + 1] = c;
-                newIdx[oldIdxLen + 2] = oldCount;
-                newIdx[oldIdxLen + 3] = c;
-                newIdx[oldIdxLen + 4] = a;
-                newIdx[oldIdxLen + 5] = oldCount;
-                geom.setIndex(new THREE.BufferAttribute(newIdx, 1));
+                newIndex = new Ctor(oldIdxLen + 6);
+                for (let i = 0; i < t; i++) newIndex[i] = idx[i];
+                newIndex[t]     = a;
+                newIndex[t + 1] = b;
+                newIndex[t + 2] = oldCount;
+                for (let i = t + 3; i < oldIdxLen; i++) newIndex[i] = idx[i];
+                newIndex[oldIdxLen]     = b;
+                newIndex[oldIdxLen + 1] = c;
+                newIndex[oldIdxLen + 2] = oldCount;
+                newIndex[oldIdxLen + 3] = c;
+                newIndex[oldIdxLen + 4] = a;
+                newIndex[oldIdxLen + 5] = oldCount;
             } else {
+                // Non-indexed: each face has its own 3 contiguous vertices.
+                // Replace the picked triangle with sub-triangle (a, b, M)
+                // in place, append (b, c, M) and (c, a, M) at the end.
+                const oldArr = oldPos.array;
                 const t = faceIndex * 9;
                 const ax = oldArr[t],     ay = oldArr[t + 1], az = oldArr[t + 2];
                 const bx = oldArr[t + 3], by = oldArr[t + 4], bz = oldArr[t + 5];
                 const cx = oldArr[t + 6], cy = oldArr[t + 7], cz = oldArr[t + 8];
                 const nx = localPosition.x, ny = localPosition.y, nz = localPosition.z;
 
-                const newPositions = new Float32Array(oldArr.length + 18);
-                newPositions.set(oldArr);
+                newPositions = new Float32Array(oldArr.length + 18);
+                newPositions.set(oldArr.subarray(0, oldCount * 3));
                 newPositions[t]     = ax; newPositions[t + 1] = ay; newPositions[t + 2] = az;
                 newPositions[t + 3] = bx; newPositions[t + 4] = by; newPositions[t + 5] = bz;
                 newPositions[t + 6] = nx; newPositions[t + 7] = ny; newPositions[t + 8] = nz;
-                const e = oldArr.length;
+                const e = oldCount * 3;
                 newPositions[e]      = bx; newPositions[e + 1]  = by; newPositions[e + 2]  = bz;
                 newPositions[e + 3]  = cx; newPositions[e + 4]  = cy; newPositions[e + 5]  = cz;
                 newPositions[e + 6]  = nx; newPositions[e + 7]  = ny; newPositions[e + 8]  = nz;
                 newPositions[e + 9]  = cx; newPositions[e + 10] = cy; newPositions[e + 11] = cz;
                 newPositions[e + 12] = ax; newPositions[e + 13] = ay; newPositions[e + 14] = az;
                 newPositions[e + 15] = nx; newPositions[e + 16] = ny; newPositions[e + 17] = nz;
-
-                geom.setAttribute("position", new THREE.Float32BufferAttribute(newPositions, 3));
+                newIndex = null;
             }
 
-            // BoxGeometry (and other primitives) define per-face render
-            // groups. Our appended sub-triangles fall outside every group
-            // range, so without clearing groups they aren't drawn at all -
-            // leaving a hole in the cube that reads as see-through (PBR) or
-            // shows the BackSide outline shell as a black silhouette (toon).
-            if (typeof geom.clearGroups === "function") geom.clearGroups();
+            newGeom.setAttribute("position", new THREE.Float32BufferAttribute(newPositions, 3));
+            if (newIndex) newGeom.setIndex(new THREE.BufferAttribute(newIndex, 1));
+            newGeom.computeVertexNormals();
+            newGeom.computeBoundingBox();
+            newGeom.computeBoundingSphere();
 
-            geom.computeVertexNormals();
-            geom.computeBoundingBox();
-            geom.computeBoundingSphere();
-            if (geom.userData) {
-                geom.userData.outlineNormalVersion = null;
-                geom.userData.sharedTopologyPrimitive = null;
-                geom.userData.sharedQuadFaces = null;
-                geom.userData.sharedVertices = null;
-                geom.userData.triangleToQuad = null;
-            }
+            // Swap geometry and dispose the old one. Outline child references
+            // mesh.geometry through ensureOutlineForMesh(); the swap is
+            // detected there and outlineNormal is rebuilt against the new
+            // attribute set.
+            mesh.geometry = newGeom;
             if (typeof sculptAdjacencyCache !== "undefined" && sculptAdjacencyCache.delete) {
-                sculptAdjacencyCache.delete(geom);
+                sculptAdjacencyCache.delete(oldGeom);
             }
-            // Topology changed — retype primitive so undo/serialization uses the
-            // generic position-array path instead of shared-quad reconstruction
+            oldGeom.dispose();
+
+            // Topology changed - retype primitive so undo/serialization uses
+            // the generic position-array path instead of shared-quad
+            // reconstruction.
             if (mesh.userData && (mesh.userData.type === "cube" || mesh.userData.type === "plane")) {
                 mesh.userData.type = "mesh";
             }
