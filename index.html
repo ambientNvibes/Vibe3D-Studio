@@ -5131,6 +5131,14 @@
                         { action: "vertexRelax", icon: "≈", label: "Relax" }
                     ],
                     [
+                        { action: "insertSnapFree",   icon: "·", label: "Free",   active: () => insertSnapMode === "free",
+                          visible: () => pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert" },
+                        { action: "insertSnapCenter", icon: "◎", label: "Center", active: () => insertSnapMode === "center",
+                          visible: () => pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert" },
+                        { action: "insertSnapEdge",   icon: "┃", label: "Edge",   active: () => insertSnapMode === "edge",
+                          visible: () => pendingFacePickState.armed && pendingFacePickState.purpose === "vertexInsert" }
+                    ],
+                    [
                         { action: "toggleSnap", icon: "⌁", label: () => snapEnabled ? "Snap On" : "Snap Off", active: () => snapEnabled },
                         { action: "axisFree", icon: "⟡", label: "Free", active: () => axisLock === null },
                         { action: "axisX", icon: "X", label: "X", active: () => axisLock === "x" },
@@ -5362,6 +5370,14 @@
             purpose: null
         };
 
+        // "free" = drop exactly where the user tapped (raw raycast point)
+        // "center" = snap to the centroid of the picked triangle, or the
+        //            quad center when an adjacent coplanar partner triangle
+        //            forms a quad with it (cube-style faces)
+        // "edge"   = snap to the midpoint of whichever triangle edge is
+        //            closest to the tap point
+        let insertSnapMode = "free";
+
 
         const insertPreviewIndicator = new THREE.Mesh(
             new THREE.SphereGeometry(0.05, 18, 18),
@@ -5402,7 +5418,13 @@
                 hideInsertPreview();
                 return;
             }
-            insertPreviewIndicator.position.copy(hits[0].point);
+            const hit = hits[0];
+            mesh.updateMatrixWorld();
+            const localHit = mesh.worldToLocal(hit.point.clone());
+            const snapped = (hit.faceIndex != null)
+                ? snapInsertHit(mesh, hit.faceIndex, localHit)
+                : localHit;
+            insertPreviewIndicator.position.copy(mesh.localToWorld(snapped.clone()));
             // Match indicator scale to vertex handle size
             mesh.geometry.computeBoundingBox?.();
             const box = mesh.geometry.boundingBox;
@@ -5444,6 +5466,104 @@
             hideInsertPreview();
             setStatus("Insert off");
             updateUI();
+        }
+
+
+        // Walk the index buffer looking for a triangle that shares exactly
+        // two vertices with (a, b, c) and whose face normal matches within
+        // a small tolerance. Used by Smart Insert "Center" so we snap to
+        // the quad center on cube-style faces instead of the off-center
+        // triangle centroid.
+        function findCoplanarQuadPartner(geom, faceIndex, ai, bi, ci) {
+            const idxAttr = geom.index;
+            const pos = geom.attributes.position;
+            if (!idxAttr || !pos) return null;
+            const idx = idxAttr.array;
+            const triCount = idx.length / 3;
+
+            const a = new THREE.Vector3().fromBufferAttribute(pos, ai);
+            const b = new THREE.Vector3().fromBufferAttribute(pos, bi);
+            const c = new THREE.Vector3().fromBufferAttribute(pos, ci);
+            const n1 = new THREE.Vector3().subVectors(b, a)
+                .cross(new THREE.Vector3().subVectors(c, a));
+            const n1Len = n1.length();
+            if (n1Len < 1e-8) return null;
+            n1.divideScalar(n1Len);
+
+            const tri = [ai, bi, ci];
+            for (let f = 0; f < triCount; f++) {
+                if (f === faceIndex) continue;
+                const t = f * 3;
+                const xa = idx[t], xb = idx[t + 1], xc = idx[t + 2];
+                const xs = [xa, xb, xc];
+                let shared = 0;
+                let fourth = -1;
+                for (const v of xs) {
+                    if (v === ai || v === bi || v === ci) shared++;
+                    else fourth = v;
+                }
+                if (shared !== 2 || fourth < 0) continue;
+
+                const pa = new THREE.Vector3().fromBufferAttribute(pos, xa);
+                const pb = new THREE.Vector3().fromBufferAttribute(pos, xb);
+                const pc = new THREE.Vector3().fromBufferAttribute(pos, xc);
+                const n2 = new THREE.Vector3().subVectors(pb, pa)
+                    .cross(new THREE.Vector3().subVectors(pc, pa));
+                const n2Len = n2.length();
+                if (n2Len < 1e-8) continue;
+                n2.divideScalar(n2Len);
+
+                if (Math.abs(n1.dot(n2)) > 0.999) {
+                    return new THREE.Vector3().fromBufferAttribute(pos, fourth);
+                }
+            }
+            return null;
+        }
+
+        // Returns the local-space point where the new vertex should be
+        // dropped, given the raycast hit. Falls back to localHit on any
+        // degenerate input or when no snap target resolves.
+        function snapInsertHit(mesh, faceIndex, localHit) {
+            if (insertSnapMode === "free") return localHit;
+            const geom = mesh.geometry;
+            const pos = geom.attributes.position;
+            if (!pos) return localHit;
+
+            let ai, bi, ci;
+            if (geom.index) {
+                const idx = geom.index.array;
+                const t = faceIndex * 3;
+                ai = idx[t]; bi = idx[t + 1]; ci = idx[t + 2];
+            } else {
+                const t = faceIndex * 3;
+                ai = t; bi = t + 1; ci = t + 2;
+            }
+            const a = new THREE.Vector3().fromBufferAttribute(pos, ai);
+            const b = new THREE.Vector3().fromBufferAttribute(pos, bi);
+            const c = new THREE.Vector3().fromBufferAttribute(pos, ci);
+
+            if (insertSnapMode === "center") {
+                if (geom.index) {
+                    const fourth = findCoplanarQuadPartner(geom, faceIndex, ai, bi, ci);
+                    if (fourth) {
+                        return a.clone().add(b).add(c).add(fourth).multiplyScalar(0.25);
+                    }
+                }
+                return a.clone().add(b).add(c).multiplyScalar(1 / 3);
+            }
+
+            if (insertSnapMode === "edge") {
+                const edges = [[a, b], [b, c], [c, a]];
+                let best = null, bestDist = Infinity;
+                for (const [p, q] of edges) {
+                    const mid = p.clone().add(q).multiplyScalar(0.5);
+                    const d = mid.distanceToSquared(localHit);
+                    if (d < bestDist) { bestDist = d; best = mid; }
+                }
+                if (best) return best;
+            }
+
+            return localHit;
         }
 
 
@@ -5559,7 +5679,8 @@
             }
 
             mesh.updateMatrixWorld();
-            const localHit = mesh.worldToLocal(hit.point.clone());
+            const localHitRaw = mesh.worldToLocal(hit.point.clone());
+            const localHit = snapInsertHit(mesh, hit.faceIndex, localHitRaw);
 
             insertVertexInTriangle(mesh, hit.faceIndex, localHit);
             ensureOutlineForMesh(mesh);
@@ -5634,9 +5755,12 @@
             if (!config.groups.length) {
                 html += `<div class="bottom-group"><button class="bottom-btn" type="button">Edit tools coming soon</button></div>`;
             } else {
-                html += config.groups.map((group) => `
+                html += config.groups.map((group) => {
+                    const visibleItems = group.filter((item) => !item.visible || item.visible());
+                    if (!visibleItems.length) return "";
+                    return `
                     <div class="bottom-group">
-                        ${group.map((item) => {
+                        ${visibleItems.map((item) => {
                             const itemLabel = typeof item.label === "function" ? item.label() : item.label;
                             const itemIcon = typeof item.icon === "function" ? item.icon() : item.icon;
                             return `
@@ -5646,7 +5770,8 @@
                         `;
                         }).join("")}
                     </div>
-                `).join("");
+                `;
+                }).join("");
             }
             dock.innerHTML = html;
         }
@@ -9903,6 +10028,9 @@
                 case "toggleSnap": toggleSnap(); break;
                 case "moveMode": setTransformMode("translate"); break;
                 case "vertexInsert": vertexInsertSelected(); break;
+                case "insertSnapFree":   insertSnapMode = "free";   updateUI(); break;
+                case "insertSnapCenter": insertSnapMode = "center"; updateUI(); break;
+                case "insertSnapEdge":   insertSnapMode = "edge";   updateUI(); break;
                 case "vertexWeld": vertexWeldSelected(); break;
                 case "vertexRelax": vertexRelaxSelected(); break;
                 case "vertexClearSelection": clearVertexSelection(); break;
